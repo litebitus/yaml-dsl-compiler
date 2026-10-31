@@ -43,6 +43,7 @@ jobs:
         uses: actions/setup-go@v7.0.0
         with:
           go-version: 1.27.3
+          cache: false
 
       - name: Test
         run: make test
@@ -115,6 +116,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NEXT: ${{ steps.version.outputs.next }}
         run: gh release create "$NEXT" --title "$NEXT" --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag
+
+      - name: Summary
+        if: ${{ !inputs.dry_run }}
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse --short=7 HEAD)"
+          echo "Published \`yaml-dsl-compiler\` \`${NEXT#v}\` from commit \`${commit}\`." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
