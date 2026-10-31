@@ -85,6 +85,17 @@ jobs:
           fi
           awk '/^## Unreleased$/ { inside = 1; next } /^## / { inside = 0 } inside && NF { found = 1 } END { exit !found }' CHANGELOG.md ||
             { echo "CHANGELOG.md has nothing under '## Unreleased' to release as $NEXT" >&2; exit 1; }
+          unpublished="$(cargo metadata --format-version 1 --locked | jq -r '
+            .workspace_members as $members
+            | .packages[]
+            | select(.id as $id | $members | index($id) | not)
+            | select(.source == null or (.source | startswith("git+")))
+            | "\(.name) \(.version) from \(.source // "a local path")"')"
+          if [ -n "$unpublished" ]; then
+            echo "a release depends only on published crates; these are not:" >&2
+            echo "$unpublished" >&2
+            exit 1
+          fi
           cargo publish -p yaml-dsl-compiler --dry-run
 
       - name: Stamp the changelog and the crate version, tag and push

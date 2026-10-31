@@ -1,8 +1,9 @@
 //! HCL, in the style `terraform fmt` leaves unchanged.
 
 use crate::output::{
-    Attribute, Block, BodyItem, Expression, FunctionCall, OutputFile, TemplatePart, Traversal,
-    TraversalStep,
+    Attribute, BinaryOperator, Block, BodyItem, Conditional, Expression, ForExpression,
+    FunctionCall, ObjectKey, OutputFile, Strip, TemplatePart, Traversal, TraversalRoot,
+    TraversalStep, UnaryOperator,
 };
 use crate::writer::MAX_LINE_WIDTH;
 
@@ -97,7 +98,12 @@ fn item_lines(items: &[Item<'_>], indent: usize) -> Result<Vec<String>, String> 
             } => {
                 let lines =
                     expression_lines(value, indent, indent + key_width_bound + " = ".len(), true)?;
-                let stands_apart = lines.len() > 1 && matches!(value, Expression::Map(_));
+                let stands_apart = lines.len() > 1
+                    && match value {
+                        Expression::Map(_) => true,
+                        Expression::For(for_expression) => for_expression.key.is_some(),
+                        _ => false,
+                    };
                 RenderedItem {
                     key: Some(key.as_str()),
                     comment: *comment,
@@ -224,18 +230,23 @@ fn expression_lines(
         Expression::Map(entries) => {
             let items: Vec<Item<'_>> = entries
                 .iter()
-                .map(|(key, value)| Item::Assignment {
-                    key: map_key(key),
-                    value,
-                    comment: None,
+                .map(|(key, value)| {
+                    Ok(Item::Assignment {
+                        key: object_key(key)?,
+                        value,
+                        comment: None,
+                    })
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
             let mut lines = vec!["{".to_owned()];
             lines.extend(item_lines(&items, inner)?);
             lines.push(format!("{}}}", spaces(indent)));
             Ok(lines)
         }
         Expression::Call(call) => {
+            if let Some(lines) = hugging_call_lines(call, indent, used)? {
+                return Ok(lines);
+            }
             let mut lines = vec![format!("{}(", call.function)];
             let count = call.arguments.len();
             for (position, argument) in call.arguments.iter().enumerate() {
@@ -254,8 +265,140 @@ fn expression_lines(
             lines.push(format!("{})", spaces(indent)));
             Ok(lines)
         }
-        _ => Ok(vec![inline(expression)?.unwrap_or_default()]),
+        Expression::For(for_expression) => for_lines(for_expression, indent),
+        Expression::Conditional(conditional) => conditional_lines(conditional, indent, used),
+        _ => Ok(vec![flat(expression)?]),
     }
+}
+
+/// A call whose last argument is a map or a list, written around it: its other
+/// arguments and the map's opening on the call's line, and its closing with the
+/// map's, `f(a, {` to `})`.
+fn hugging_call_lines(
+    call: &FunctionCall,
+    indent: usize,
+    used: usize,
+) -> Result<Option<Vec<String>>, String> {
+    let Some((last, leading)) = call.arguments.split_last() else {
+        return Ok(None);
+    };
+    if !matches!(last, Expression::Map(entries) if !entries.is_empty())
+        && !matches!(last, Expression::List(items) if !items.is_empty())
+    {
+        return Ok(None);
+    }
+    let mut opening = format!("{}(", call.function);
+    for argument in leading {
+        let Some(text) = inline(argument)? else {
+            return Ok(None);
+        };
+        opening.push_str(&text);
+        opening.push_str(", ");
+    }
+    if used + opening.len() + 1 > MAX_LINE_WIDTH {
+        return Ok(None);
+    }
+    let mut lines = expression_lines(last, indent, used + opening.len(), false)?;
+    if lines.len() == 1 {
+        return Ok(None);
+    }
+    lines[0].insert_str(0, &opening);
+    let closing = lines.last_mut().expect("a broken map has lines");
+    if call.expand_final_argument {
+        closing.push_str("...");
+    }
+    closing.push(')');
+    Ok(Some(lines))
+}
+
+/// A conditional too wide for one line: its condition on the first line, and each
+/// branch broken as any value is.
+fn conditional_lines(
+    conditional: &Conditional,
+    indent: usize,
+    used: usize,
+) -> Result<Vec<String>, String> {
+    let needs_parentheses = precedence(&conditional.condition) < OPERAND_PRECEDENCE
+        || precedence(&conditional.if_true) < OPERAND_PRECEDENCE;
+    if needs_parentheses {
+        return Ok(vec![flat(&Expression::Conditional(Box::new(
+            conditional.clone(),
+        )))?]);
+    }
+    let condition = format!("{} ? ", flat(&conditional.condition)?);
+    let mut lines = expression_lines(&conditional.if_true, indent, used + condition.len(), false)?;
+    lines[0].insert_str(0, &condition);
+    let last_width = if lines.len() == 1 {
+        used + lines[0].len()
+    } else {
+        lines.last().map_or(0, String::len)
+    };
+    let mut otherwise = expression_lines(&conditional.if_false, indent, last_width + 3, false)?;
+    let last = lines.last_mut().expect("a branch has a line");
+    last.push_str(" : ");
+    last.push_str(&otherwise.remove(0));
+    lines.extend(otherwise);
+    Ok(lines)
+}
+
+/// A `for` expression too wide for one line: its brackets on lines of their own,
+/// and its collection and value broken as any value is.
+fn for_lines(for_expression: &ForExpression, indent: usize) -> Result<Vec<String>, String> {
+    let inner = indent + INDENT_WIDTH;
+    let (open, close) = brackets(for_expression);
+    let variables = match &for_expression.key_variable {
+        Some(key) => format!("{key}, {}", for_expression.value_variable),
+        None => for_expression.value_variable.clone(),
+    };
+    let head = format!("{}for {variables} in ", spaces(inner));
+    let mut lines = vec![open.to_owned()];
+    let mut collection = expression_lines(&for_expression.collection, inner, head.len(), false)?;
+    collection[0].insert_str(0, &head);
+    let mut prefix = collection.pop().expect("a collection has a line");
+    lines.extend(collection);
+    prefix.push_str(" : ");
+    if let Some(key) = &for_expression.key {
+        prefix.push_str(&format!("{} => ", flat(key)?));
+    }
+    let mut value_lines = expression_lines(&for_expression.value, inner, prefix.len(), false)?;
+    value_lines[0].insert_str(0, &prefix);
+    let last = value_lines.last_mut().expect("an expression has a line");
+    last.push_str(&for_tail(for_expression)?);
+    lines.extend(value_lines);
+    lines.push(format!("{}{close}", spaces(indent)));
+    Ok(lines)
+}
+
+fn brackets(for_expression: &ForExpression) -> (&'static str, &'static str) {
+    if for_expression.key.is_some() {
+        ("{", "}")
+    } else {
+        ("[", "]")
+    }
+}
+
+/// `for key, value in collection :`
+fn for_head(for_expression: &ForExpression) -> Result<String, String> {
+    let variables = match &for_expression.key_variable {
+        Some(key) => format!("{key}, {}", for_expression.value_variable),
+        None => for_expression.value_variable.clone(),
+    };
+    Ok(format!(
+        "for {variables} in {} :",
+        flat(&for_expression.collection)?
+    ))
+}
+
+/// The grouping marker and the condition after a `for` expression's value.
+fn for_tail(for_expression: &ForExpression) -> Result<String, String> {
+    let mut tail = String::new();
+    if for_expression.grouping {
+        tail.push_str("...");
+    }
+    if let Some(condition) = &for_expression.condition {
+        tail.push_str(&format!(" if {}", flat(condition)?));
+    }
+    Ok(tail)
 }
 
 fn breakable(expression: &Expression) -> bool {
@@ -263,6 +406,7 @@ fn breakable(expression: &Expression) -> bool {
         Expression::List(items) => !items.is_empty(),
         Expression::Map(entries) => !entries.is_empty(),
         Expression::Call(call) => !call.arguments.is_empty(),
+        Expression::For(_) | Expression::Conditional(_) => true,
         _ => false,
     }
 }
@@ -270,18 +414,41 @@ fn breakable(expression: &Expression) -> bool {
 /// The expression on one line, or `None` for a list or map of more items than a
 /// line holds by style.
 fn inline(expression: &Expression) -> Result<Option<String>, String> {
+    inline_within(expression, Some(MAX_INLINE_ITEMS))
+}
+
+/// The expression on one line, whatever its lists and maps hold.
+fn flat(expression: &Expression) -> Result<String, String> {
+    Ok(inline_within(expression, None)?.expect("a flat expression is always written"))
+}
+
+fn inline_within(
+    expression: &Expression,
+    item_limit: Option<usize>,
+) -> Result<Option<String>, String> {
+    let over_limit = |count: usize| item_limit.is_some_and(|limit| count > limit);
+    let operand = |operand: &Expression, minimum: u8| -> Result<Option<String>, String> {
+        let Some(text) = inline_within(operand, item_limit)? else {
+            return Ok(None);
+        };
+        Ok(Some(if precedence(operand) < minimum {
+            format!("({text})")
+        } else {
+            text
+        }))
+    };
     Ok(Some(match expression {
         Expression::Null => "null".to_owned(),
         Expression::Bool(flag) => flag.to_string(),
         Expression::Number(text) => number(text)?,
         Expression::String(text) => quoted(text),
         Expression::List(items) => {
-            if items.len() > MAX_INLINE_ITEMS {
+            if over_limit(items.len()) {
                 return Ok(None);
             }
             let mut parts = Vec::with_capacity(items.len());
             for item in items {
-                let Some(part) = inline(item)? else {
+                let Some(part) = inline_within(item, item_limit)? else {
                     return Ok(None);
                 };
                 parts.push(part);
@@ -289,7 +456,7 @@ fn inline(expression: &Expression) -> Result<Option<String>, String> {
             format!("[{}]", parts.join(", "))
         }
         Expression::Map(entries) => {
-            if entries.len() > MAX_INLINE_ITEMS {
+            if over_limit(entries.len()) {
                 return Ok(None);
             }
             if entries.is_empty() {
@@ -297,46 +464,133 @@ fn inline(expression: &Expression) -> Result<Option<String>, String> {
             }
             let mut parts = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                let Some(part) = inline(value)? else {
+                let Some(part) = inline_within(value, item_limit)? else {
                     return Ok(None);
                 };
-                parts.push(format!("{} = {part}", map_key(key)));
+                parts.push(format!("{} = {part}", object_key(key)?));
             }
             format!("{{ {} }}", parts.join(", "))
         }
         Expression::Traversal(traversal) => traversal_text(traversal)?,
         Expression::Call(call) => {
-            let Some(arguments) = call_arguments_inline(call)? else {
+            let Some(arguments) = call_arguments_inline(call, item_limit)? else {
                 return Ok(None);
             };
             format!("{}({arguments})", call.function)
         }
         Expression::Template(parts) => match parts.as_slice() {
-            [TemplatePart::Interpolation(expression)] => return inline(expression),
-            _ => {
-                let mut text = String::from("\"");
-                for part in parts {
-                    match part {
-                        TemplatePart::Text(literal) => text.push_str(&escape_quoted(literal)),
-                        TemplatePart::Interpolation(expression) => {
-                            let Some(inner) = inline(expression)? else {
-                                return Ok(None);
-                            };
-                            text.push_str(&format!("${{{inner}}}"));
-                        }
-                    }
-                }
-                text.push('"');
-                text
+            [TemplatePart::Interpolation(interpolation)]
+                if interpolation.strip == Strip::default() =>
+            {
+                return inline_within(&interpolation.expression, item_limit);
             }
+            _ => format!("\"{}\"", template_text(parts, escape_quoted)?),
         },
+        Expression::Conditional(conditional) => {
+            let (Some(condition), Some(if_true), Some(if_false)) = (
+                operand(&conditional.condition, OPERAND_PRECEDENCE)?,
+                operand(&conditional.if_true, OPERAND_PRECEDENCE)?,
+                operand(&conditional.if_false, CONDITIONAL_PRECEDENCE)?,
+            ) else {
+                return Ok(None);
+            };
+            format!("{condition} ? {if_true} : {if_false}")
+        }
+        Expression::For(for_expression) => {
+            let Some(value) = inline_within(&for_expression.value, item_limit)? else {
+                return Ok(None);
+            };
+            let head = for_head(for_expression)?;
+            let tail = for_tail(for_expression)?;
+            match &for_expression.key {
+                Some(key) => format!("{{ {head} {} => {value}{tail} }}", flat(key)?),
+                None => format!("[{head} {value}{tail}]"),
+            }
+        }
+        Expression::Unary(operator, operand_expression) => {
+            let Some(text) = operand(operand_expression, UNARY_PRECEDENCE)? else {
+                return Ok(None);
+            };
+            let symbol = match operator {
+                UnaryOperator::Not => "!",
+                UnaryOperator::Negate => "-",
+            };
+            format!("{symbol}{text}")
+        }
+        Expression::Binary(operation) => {
+            let level = operator_precedence(operation.operator);
+            let (Some(left), Some(right)) = (
+                operand(&operation.left, level)?,
+                operand(&operation.right, level + 1)?,
+            ) else {
+                return Ok(None);
+            };
+            format!("{left} {} {right}", operator_symbol(operation.operator))
+        }
+        Expression::Parenthesis(inner) => {
+            let Some(text) = inline_within(inner, item_limit)? else {
+                return Ok(None);
+            };
+            format!("({text})")
+        }
     }))
 }
 
-fn call_arguments_inline(call: &FunctionCall) -> Result<Option<String>, String> {
+const CONDITIONAL_PRECEDENCE: u8 = 0;
+const OPERAND_PRECEDENCE: u8 = 1;
+const UNARY_PRECEDENCE: u8 = 7;
+const PRIMARY_PRECEDENCE: u8 = 8;
+
+/// How tightly an expression binds: an operand binding less tightly than its
+/// operator needs parentheses.
+fn precedence(expression: &Expression) -> u8 {
+    match expression {
+        Expression::Conditional(_) => CONDITIONAL_PRECEDENCE,
+        Expression::Binary(operation) => operator_precedence(operation.operator),
+        Expression::Unary(..) => UNARY_PRECEDENCE,
+        _ => PRIMARY_PRECEDENCE,
+    }
+}
+
+fn operator_precedence(operator: BinaryOperator) -> u8 {
+    match operator {
+        BinaryOperator::Or => 1,
+        BinaryOperator::And => 2,
+        BinaryOperator::Equal | BinaryOperator::NotEqual => 3,
+        BinaryOperator::Less
+        | BinaryOperator::LessOrEqual
+        | BinaryOperator::Greater
+        | BinaryOperator::GreaterOrEqual => 4,
+        BinaryOperator::Add | BinaryOperator::Subtract => 5,
+        BinaryOperator::Multiply | BinaryOperator::Divide | BinaryOperator::Modulo => 6,
+    }
+}
+
+fn operator_symbol(operator: BinaryOperator) -> &'static str {
+    match operator {
+        BinaryOperator::Or => "||",
+        BinaryOperator::And => "&&",
+        BinaryOperator::Equal => "==",
+        BinaryOperator::NotEqual => "!=",
+        BinaryOperator::Less => "<",
+        BinaryOperator::LessOrEqual => "<=",
+        BinaryOperator::Greater => ">",
+        BinaryOperator::GreaterOrEqual => ">=",
+        BinaryOperator::Add => "+",
+        BinaryOperator::Subtract => "-",
+        BinaryOperator::Multiply => "*",
+        BinaryOperator::Divide => "/",
+        BinaryOperator::Modulo => "%",
+    }
+}
+
+fn call_arguments_inline(
+    call: &FunctionCall,
+    item_limit: Option<usize>,
+) -> Result<Option<String>, String> {
     let mut parts = Vec::with_capacity(call.arguments.len());
     for argument in &call.arguments {
-        let Some(part) = inline(argument)? else {
+        let Some(part) = inline_within(argument, item_limit)? else {
             return Ok(None);
         };
         parts.push(part);
@@ -349,10 +603,18 @@ fn call_arguments_inline(call: &FunctionCall) -> Result<Option<String>, String> 
 }
 
 fn traversal_text(traversal: &Traversal) -> Result<String, String> {
-    if !is_identifier(&traversal.root) {
-        return Err(format!("`{}` is not a traversal root", traversal.root));
-    }
-    let mut text = traversal.root.clone();
+    let mut text = match &traversal.root {
+        TraversalRoot::Variable(name) if is_identifier(name) => name.clone(),
+        TraversalRoot::Variable(name) => return Err(format!("`{name}` is not a traversal root")),
+        TraversalRoot::Expression(expression) => {
+            let root = flat(expression)?;
+            if precedence(expression) < PRIMARY_PRECEDENCE {
+                format!("({root})")
+            } else {
+                root
+            }
+        }
+    };
     for step in &traversal.steps {
         match step {
             TraversalStep::Attribute(name)
@@ -362,36 +624,78 @@ fn traversal_text(traversal: &Traversal) -> Result<String, String> {
                 text.push_str(name);
             }
             TraversalStep::Attribute(name) => text.push_str(&format!("[{}]", quoted(name))),
-            TraversalStep::Index(index) => {
-                let inner = inline(index)?.ok_or("a traversal index is written on one line")?;
-                text.push_str(&format!("[{inner}]"));
+            TraversalStep::Index(index) => text.push_str(&format!("[{}]", flat(index)?)),
+            TraversalStep::AttributeSplat => text.push_str(".*"),
+            TraversalStep::FullSplat => text.push_str("[*]"),
+        }
+    }
+    Ok(text)
+}
+
+/// A template's text, its literal parts escaped by `escape`.
+fn template_text(parts: &[TemplatePart], escape: fn(&str) -> String) -> Result<String, String> {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            TemplatePart::Text(literal) => text.push_str(&escape(literal)),
+            TemplatePart::Interpolation(interpolation) => {
+                let inner = flat(&interpolation.expression)?;
+                text.push_str(&template_tag("$", &inner, interpolation.strip));
+            }
+            TemplatePart::If(directive) => {
+                let condition = format!("if {}", flat(&directive.condition)?);
+                text.push_str(&template_tag("%", &condition, directive.if_strip));
+                text.push_str(&template_text(&directive.then_parts, escape)?);
+                if let Some((strip, else_parts)) = &directive.else_branch {
+                    text.push_str(&template_tag("%", "else", *strip));
+                    text.push_str(&template_text(else_parts, escape)?);
+                }
+                text.push_str(&template_tag("%", "endif", directive.endif_strip));
+            }
+            TemplatePart::For(directive) => {
+                let variables = match &directive.key_variable {
+                    Some(key) => format!("{key}, {}", directive.value_variable),
+                    None => directive.value_variable.clone(),
+                };
+                let head = format!("for {variables} in {}", flat(&directive.collection)?);
+                text.push_str(&template_tag("%", &head, directive.for_strip));
+                text.push_str(&template_text(&directive.body, escape)?);
+                text.push_str(&template_tag("%", "endfor", directive.endfor_strip));
             }
         }
     }
     Ok(text)
 }
 
+/// `${inner}` or `%{ inner }`, with `~` where the tag strips whitespace.
+fn template_tag(sigil: &str, inner: &str, strip: Strip) -> String {
+    let padding = if sigil == "%" { " " } else { "" };
+    let before = if strip.before { "~ " } else { padding };
+    let after = if strip.after { " ~" } else { padding };
+    format!("{sigil}{{{before}{inner}{after}}}")
+}
+
+fn holds_line_break(parts: &[TemplatePart]) -> bool {
+    parts.iter().any(|part| match part {
+        TemplatePart::Text(literal) => literal.contains('\n'),
+        TemplatePart::Interpolation(_) => false,
+        TemplatePart::If(directive) => {
+            holds_line_break(&directive.then_parts)
+                || directive
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, else_parts)| holds_line_break(else_parts))
+        }
+        TemplatePart::For(directive) => holds_line_break(&directive.body),
+    })
+}
+
 /// A string or template holding a line break, as an indented heredoc.
 fn heredoc_lines(expression: &Expression, indent: usize) -> Result<Option<Vec<String>>, String> {
     let text = match expression {
         Expression::String(text) if text.contains('\n') => escape_template(text),
-        Expression::Template(parts)
-            if parts.iter().any(
-                |part| matches!(part, TemplatePart::Text(literal) if literal.contains('\n')),
-            ) =>
-        {
-            let mut text = String::new();
-            for part in parts {
-                match part {
-                    TemplatePart::Text(literal) => text.push_str(&escape_template(literal)),
-                    TemplatePart::Interpolation(expression) => {
-                        let inner =
-                            inline(expression)?.ok_or("an interpolation is written on one line")?;
-                        text.push_str(&format!("${{{inner}}}"));
-                    }
-                }
-            }
-            text
+        Expression::Template(parts) if holds_line_break(parts) => {
+            template_text(parts, escape_template)?
         }
         _ => return Ok(None),
     };
@@ -424,6 +728,21 @@ fn comment_lines(comment: &str, indent: usize) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// A map key: a name, a template as itself, any other expression in parentheses,
+/// so HCL evaluates it rather than reading it as a name.
+fn object_key(key: &ObjectKey) -> Result<String, String> {
+    Ok(match key {
+        ObjectKey::Name(name) => map_key(name),
+        ObjectKey::Expression(Expression::Template(parts)) => {
+            format!("\"{}\"", template_text(parts, escape_quoted)?)
+        }
+        ObjectKey::Expression(
+            expression @ (Expression::String(_) | Expression::Parenthesis(_)),
+        ) => flat(expression)?,
+        ObjectKey::Expression(expression) => format!("({})", flat(expression)?),
+    })
 }
 
 fn map_key(key: &str) -> String {
@@ -633,6 +952,187 @@ mod tests {
         assert_eq!(number("+12").unwrap(), "12");
         assert_eq!(number("1.5e3").unwrap(), "1.5e3");
         assert!(number(".inf").is_err());
+    }
+
+    fn variable(name: &str) -> Expression {
+        Expression::Traversal(Traversal::of_names(name, []))
+    }
+
+    fn binary(left: Expression, operator: BinaryOperator, right: Expression) -> Expression {
+        Expression::Binary(Box::new(crate::output::BinaryOperation {
+            left,
+            operator,
+            right,
+        }))
+    }
+
+    fn written_value(value: Expression) -> String {
+        write(&file(vec![BodyItem::Attribute(Attribute::new(
+            "value", value,
+        ))]))
+        .unwrap()
+    }
+
+    #[test]
+    fn operations_take_parentheses_only_where_precedence_needs_them() {
+        let sum = binary(variable("a"), BinaryOperator::Add, variable("b"));
+        let product = binary(sum.clone(), BinaryOperator::Multiply, variable("c"));
+        assert_eq!(written_value(product), "value = (a + b) * c\n");
+        let left_first = binary(sum.clone(), BinaryOperator::Subtract, variable("c"));
+        assert_eq!(written_value(left_first), "value = a + b - c\n");
+        let right_first = binary(variable("c"), BinaryOperator::Subtract, sum);
+        assert_eq!(written_value(right_first), "value = c - (a + b)\n");
+        let negated = Expression::Unary(
+            UnaryOperator::Not,
+            Box::new(binary(variable("a"), BinaryOperator::And, variable("b"))),
+        );
+        assert_eq!(written_value(negated), "value = !(a && b)\n");
+    }
+
+    #[test]
+    fn a_conditional_and_a_splat_are_written_on_one_line() {
+        let conditional = Expression::Conditional(Box::new(crate::output::Conditional {
+            condition: binary(variable("a"), BinaryOperator::Equal, string("x")),
+            if_true: Expression::Traversal(Traversal {
+                root: TraversalRoot::Variable("module".into()),
+                steps: vec![
+                    TraversalStep::Attribute("mock".into()),
+                    TraversalStep::FullSplat,
+                    TraversalStep::Attribute("arn".into()),
+                ],
+            }),
+            if_false: Expression::List(Vec::new()),
+        }));
+        assert_eq!(
+            written_value(conditional),
+            "value = a == \"x\" ? module.mock[*].arn : []\n"
+        );
+    }
+
+    #[test]
+    fn a_call_hugs_its_map_and_a_conditional_breaks_in_its_branches() {
+        let long = "x".repeat(40);
+        let map = Expression::Map(vec![
+            ("bucket".into(), string(&long)),
+            ("region".into(), string("mock-region-1")),
+            ("role".into(), string(&long)),
+        ]);
+        let hugging = Expression::Call(FunctionCall {
+            function: "tomap".into(),
+            arguments: vec![map],
+            expand_final_argument: false,
+        });
+        let conditional = Expression::Conditional(Box::new(crate::output::Conditional {
+            condition: binary(variable("kind"), BinaryOperator::Equal, string("remote")),
+            if_true: hugging,
+            if_false: Expression::Call(FunctionCall {
+                function: "tomap".into(),
+                arguments: vec![Expression::Map(Vec::new())],
+                expand_final_argument: false,
+            }),
+        }));
+        assert_eq!(
+            written_value(conditional),
+            format!(
+                "value = kind == \"remote\" ? tomap({{\n  bucket = \"{long}\"\n  \
+                 region = \"mock-region-1\"\n  role   = \"{long}\"\n}}) : tomap({{}})\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_for_expression_breaks_its_collection_when_the_line_is_too_wide() {
+        let long = "x".repeat(60);
+        let for_expression = Expression::For(Box::new(ForExpression {
+            key_variable: None,
+            value_variable: "name".into(),
+            collection: Expression::List(vec![string(&long), string(&long), string(&long)]),
+            key: None,
+            value: variable("name"),
+            grouping: false,
+            condition: None,
+        }));
+        assert_eq!(
+            written_value(for_expression),
+            format!(
+                "value = [\n  for name in [\n    \"{long}\",\n    \"{long}\",\n    \"{long}\",\n  ] \
+                 : name\n]\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_for_expression_breaks_its_value_when_the_line_is_too_wide() {
+        let long = "x".repeat(60);
+        let for_expression = |value: Expression| {
+            Expression::For(Box::new(ForExpression {
+                key_variable: Some("name".into()),
+                value_variable: "lookup".into(),
+                collection: variable("lookups"),
+                key: Some(variable("name")),
+                value,
+                grouping: false,
+                condition: Some(variable("enabled")),
+            }))
+        };
+        assert_eq!(
+            written_value(for_expression(variable("lookup"))),
+            "value = { for name, lookup in lookups : name => lookup if enabled }\n"
+        );
+        let merge = Expression::Call(FunctionCall {
+            function: "merge".into(),
+            arguments: vec![variable("lookup"), string(&long)],
+            expand_final_argument: false,
+        });
+        assert_eq!(
+            written_value(for_expression(merge)),
+            format!(
+                "value = {{\n  for name, lookup in lookups : name => merge(\n    lookup,\n    \
+                 \"{long}\",\n  ) if enabled\n}}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_template_writes_its_directives_and_strip_markers() {
+        let template = Expression::Template(vec![
+            TemplatePart::Text("mock-".into()),
+            TemplatePart::If(Box::new(crate::output::TemplateIf {
+                condition: variable("tier"),
+                if_strip: Strip::default(),
+                then_parts: vec![TemplatePart::Interpolation(crate::output::Interpolation {
+                    expression: variable("tier"),
+                    strip: Strip {
+                        before: true,
+                        after: false,
+                    },
+                })],
+                else_branch: Some((Strip::default(), vec![TemplatePart::Text("none".into())])),
+                endif_strip: Strip::default(),
+            })),
+        ]);
+        assert_eq!(
+            written_value(template),
+            "value = \"mock-%{ if tier }${~ tier}%{ else }none%{ endif }\"\n"
+        );
+    }
+
+    #[test]
+    fn an_expression_key_is_evaluated_and_a_template_key_stays_quoted() {
+        let map = Expression::Map(vec![
+            (ObjectKey::Expression(variable("mock_key")), string("a")),
+            (
+                ObjectKey::Expression(Expression::Template(vec![
+                    TemplatePart::Interpolation(crate::output::Interpolation::new(variable("env"))),
+                    TemplatePart::Text("-b".into()),
+                ])),
+                string("b"),
+            ),
+        ]);
+        assert_eq!(
+            written_value(map),
+            "value = { (mock_key) = \"a\", \"${env}-b\" = \"b\" }\n"
+        );
     }
 
     #[test]

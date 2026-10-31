@@ -59,6 +59,9 @@ pub enum CommonLayerDiscovery {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Placeholder {
     pub pattern: String,
+    /// Text that, written right before a placeholder, keeps it as literal text.
+    #[serde(default)]
+    pub escape_prefix: Option<String>,
     #[serde(default)]
     pub unscanned_paths: Vec<PathEntry>,
 }

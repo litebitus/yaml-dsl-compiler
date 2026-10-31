@@ -1,7 +1,7 @@
 //! YAML, in block style with two-space indentation.
 
 use crate::output::{BodyItem, Expression, OutputFile};
-use crate::writer::MAX_LINE_WIDTH;
+use crate::writer::{MAX_LINE_WIDTH, key_name};
 
 const INDENT_WIDTH: usize = 2;
 const MAX_FLOW_ITEMS: usize = 2;
@@ -53,8 +53,8 @@ fn value_lines(prefix: String, value: &Expression, indent: usize) -> Result<Vec<
         Expression::Map(entries) if !entries.is_empty() => {
             let entries: Vec<(&str, &Expression, Option<&str>)> = entries
                 .iter()
-                .map(|(key, value)| (key.as_str(), value, None))
-                .collect();
+                .map(|(key, value)| Ok((key_name(key, "YAML")?, value, None)))
+                .collect::<Result<_, String>>()?;
             let mut lines = vec![prefix];
             lines.extend(map_lines(&entries, inner)?);
             Ok(lines)
@@ -98,8 +98,8 @@ fn list_item_lines(item: &Expression, indent: usize) -> Result<Vec<String>, Stri
         Expression::Map(entries) if !entries.is_empty() => {
             let entries: Vec<(&str, &Expression, Option<&str>)> = entries
                 .iter()
-                .map(|(key, value)| (key.as_str(), value, None))
-                .collect();
+                .map(|(key, value)| Ok((key_name(key, "YAML")?, value, None)))
+                .collect::<Result<_, String>>()?;
             let mut lines = map_lines(&entries, indent + INDENT_WIDTH)?;
             lines[0].replace_range(..dash.len(), &dash);
             Ok(lines)
@@ -133,9 +133,7 @@ fn scalar(value: &Expression, in_flow: bool) -> Result<String, String> {
         Expression::String(text) => Ok(scalar_text(text, in_flow)),
         Expression::List(_) => Ok("[]".to_owned()),
         Expression::Map(_) => Ok("{}".to_owned()),
-        Expression::Traversal(_) | Expression::Call(_) | Expression::Template(_) => {
-            Err("YAML has no references, calls or templates".to_owned())
-        }
+        _ => Err("YAML has no expressions such as references, calls or templates".to_owned()),
     }
 }
 

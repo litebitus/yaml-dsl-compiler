@@ -50,6 +50,21 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Snapshot: $version"
 
+      - name: Check the snapshot depends only on published crates
+        run: |
+          set -euo pipefail
+          unpublished="$(cargo metadata --format-version 1 --locked | jq -r '
+            .workspace_members as $members
+            | .packages[]
+            | select(.id as $id | $members | index($id) | not)
+            | select(.source == null or (.source | startswith("git+")))
+            | "\(.name) \(.version) from \(.source // "a local path")"')"
+          if [ -n "$unpublished" ]; then
+            echo "a snapshot depends only on published crates; these are not:" >&2
+            echo "$unpublished" >&2
+            exit 1
+          fi
+
       - name: Publish the snapshot crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

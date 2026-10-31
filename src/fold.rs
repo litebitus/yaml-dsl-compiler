@@ -3,8 +3,9 @@
 use crate::node::{Entry, Node, NodeKind};
 
 /// Merges `overlay` over `base`: maps merge key by key, the overlay winning; a null
-/// deletes the key; an empty map, a list or a scalar replaces the base's value.
-/// Keys keep the base's order, and keys only the overlay has follow.
+/// deletes the key; an empty map or list at a key the base holds opts out of it,
+/// deleting the key at any depth; any other value replaces the base's. Keys keep
+/// the base's order, and keys only the overlay has follow.
 pub fn deep_merge(base: &Node, overlay: &Node) -> Node {
     let (Some(base_entries), Some(overlay_entries)) = (base.entries(), overlay.entries()) else {
         return overlay.clone();
@@ -19,9 +20,13 @@ pub fn deep_merge(base: &Node, overlay: &Node) -> Node {
                 merged.remove(index);
             }
             (NodeKind::Null, None) => {}
-            (NodeKind::Map(entries), Some(index))
-                if !entries.is_empty() && merged[index].value.is_map() =>
-            {
+            (NodeKind::Map(entries), Some(index)) if entries.is_empty() => {
+                merged.remove(index);
+            }
+            (NodeKind::List(items), Some(index)) if items.is_empty() => {
+                merged.remove(index);
+            }
+            (NodeKind::Map(_), Some(index)) if merged[index].value.is_map() => {
                 merged[index].value = deep_merge(&merged[index].value, &overlay_entry.value);
             }
             (_, Some(index)) => merged[index] = overlay_entry.clone(),
@@ -61,9 +66,27 @@ mod tests {
     }
 
     #[test]
-    fn a_null_deletes_and_an_empty_map_replaces() {
-        let merged = deep_merge(&node("a:\n  x: 1\nb:\n  y: 2\n"), &node("a: null\nb: {}\n"));
-        assert_eq!(merged.to_json(), serde_json::json!({"b": {}}));
+    fn a_null_deletes_the_key() {
+        let merged = deep_merge(&node("a:\n  x: 1\nb: 2\n"), &node("a: null\n"));
+        assert_eq!(merged.to_json(), serde_json::json!({"b": 2}));
+    }
+
+    #[test]
+    fn an_empty_map_or_list_opts_out_of_the_common_layer_at_any_depth() {
+        let merged = deep_merge(
+            &node("a:\n  x: 1\nb: [1]\nc:\n  d:\n    e:\n      f: 1\n    g: 2\n"),
+            &node("a: {}\nb: []\nc:\n  d:\n    e: {}\n"),
+        );
+        assert_eq!(merged.to_json(), serde_json::json!({"c": {"d": {"g": 2}}}));
+    }
+
+    #[test]
+    fn an_empty_map_or_list_the_common_layer_lacks_is_content() {
+        let merged = deep_merge(&node("a: 1\n"), &node("b: {}\nc: []\n"));
+        assert_eq!(
+            merged.to_json(),
+            serde_json::json!({"a": 1, "b": {}, "c": []})
+        );
     }
 
     #[test]

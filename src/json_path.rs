@@ -1,6 +1,7 @@
 //! The JSONPath subset the DSL definition's paths are written in.
 
 use crate::diagnostic::Diagnostic;
+use crate::resolved::{Value, ValueKind};
 
 /// One step of a concrete path into a document.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +76,43 @@ impl PathPattern {
             selectors,
             skip_keys: skip_keys.to_vec(),
         })
+    }
+
+    /// Every node of `document` the pattern selects, with its path, in the order
+    /// the document writes them.
+    pub fn select<'v>(&self, document: &'v Value) -> Vec<(Vec<PathStep>, &'v Value)> {
+        let mut selected = Vec::new();
+        let mut path = Vec::new();
+        self.collect(document, &mut path, &mut selected);
+        selected
+    }
+
+    fn collect<'v>(
+        &self,
+        value: &'v Value,
+        path: &mut Vec<PathStep>,
+        selected: &mut Vec<(Vec<PathStep>, &'v Value)>,
+    ) {
+        if self.selects(path) {
+            selected.push((path.clone(), value));
+        }
+        match &value.kind {
+            ValueKind::Map(entries) => {
+                for entry in entries {
+                    path.push(PathStep::Key(entry.key.clone()));
+                    self.collect(&entry.value, path, selected);
+                    path.pop();
+                }
+            }
+            ValueKind::List(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    path.push(PathStep::Index(index));
+                    self.collect(item, path, selected);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Whether the pattern selects the node at `path`.
@@ -187,6 +225,33 @@ mod tests {
             pattern("$.cases[*].steps[*].*", &[])
                 .selects(&path(&["cases", "0", "steps", "2", "call"]))
         );
+    }
+
+    #[test]
+    fn select_answers_every_selected_node_in_document_order() {
+        use crate::position::Position;
+        use crate::resolved::MapEntry;
+        let position = Position::file_start(&std::sync::Arc::from("mock.yml"));
+        let entry = |key: &str, value: Value| MapEntry {
+            key: key.to_owned(),
+            key_position: position.clone(),
+            value,
+        };
+        let leaf = |text: &str| Value::string(text, position.clone());
+        let map = |entries| Value::new(ValueKind::Map(entries), position.clone());
+        let document = map(vec![
+            entry(
+                "queue",
+                map(vec![entry("b", leaf("1")), entry("a", leaf("2"))]),
+            ),
+            entry("locals", map(vec![entry("c", leaf("3"))])),
+        ]);
+        let selected: Vec<Vec<PathStep>> = pattern("$.*.*", &["locals"])
+            .select(&document)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(selected, [path(&["queue", "b"]), path(&["queue", "a"])]);
     }
 
     #[test]

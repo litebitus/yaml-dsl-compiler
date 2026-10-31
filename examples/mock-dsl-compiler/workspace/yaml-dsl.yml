@@ -97,6 +97,3 @@ dsls:
         scope_name: GLOBAL
         scope_group: null
         name_group: name
-    code_generation:
-      output_file: generated.tf
-      module_source: registry.example.com/mock/components

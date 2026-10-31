@@ -4,6 +4,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::node::number_json;
 use crate::output::{BodyItem, Expression, OutputFile};
+use crate::writer::key_name;
 
 pub fn write(file: &OutputFile) -> Result<String, String> {
     if file.comment.is_some() {
@@ -95,12 +96,14 @@ fn json(expression: &Expression) -> Result<JsonValue, String> {
         Expression::Map(entries) => {
             let mut object = Map::new();
             for (key, value) in entries {
-                object.insert(key.clone(), json(value)?);
+                object.insert(key_name(key, "JSON")?.to_owned(), json(value)?);
             }
             JsonValue::Object(object)
         }
-        Expression::Traversal(_) | Expression::Call(_) | Expression::Template(_) => {
-            return Err("JSON has no references, calls or templates".to_owned());
+        _ => {
+            return Err(
+                "JSON has no expressions such as references, calls or templates".to_owned(),
+            );
         }
     })
 }

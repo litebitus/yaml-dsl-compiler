@@ -1,13 +1,13 @@
 //! The library's entry point: a compiler for one DSL over one file source.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use crate::definition::DslDefinition;
 use crate::diagnostic::Diagnostic;
-use crate::discover::{Unit, units};
+use crate::discover::{Unit, selects, unit_of, units};
 use crate::output::OutputFile;
 use crate::resolve::Resolution;
 pub use crate::resolve::{BuiltinValues, ResolvedUnit};
@@ -66,9 +66,40 @@ impl Compiler {
         )
     }
 
+    /// The unit of one document, found without listing any directory; `None` where
+    /// the DSL does not select the document.
+    pub fn unit_of(&self, document: &Path) -> Result<Option<Unit>, Diagnostic> {
+        unit_of(
+            self.resolution.definition(),
+            self.resolution.config_root(),
+            document,
+            self.source.as_ref(),
+        )
+    }
+
+    /// Whether the DSL's file patterns select the document at `document`.
+    pub fn selects(&self, document: &Path) -> Result<bool, Diagnostic> {
+        selects(
+            self.resolution.definition(),
+            self.resolution.config_root(),
+            document,
+        )
+    }
+
     pub fn resolve(&self, unit: &Unit) -> Result<ResolvedUnit, Vec<Diagnostic>> {
         self.resolution
             .resolve(unit, self.source.as_ref(), self.builtins.as_deref())
+    }
+
+    /// Resolves `unit` with `builtins` giving its builtin names their values, for a
+    /// caller whose values differ from one resolution of a document to the next.
+    pub fn resolve_with_builtins(
+        &self,
+        unit: &Unit,
+        builtins: &dyn BuiltinValues,
+    ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
+        self.resolution
+            .resolve(unit, self.source.as_ref(), Some(builtins))
     }
 
     /// Compiles `unit`. A fragment compiles to no files.

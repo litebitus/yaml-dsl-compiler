@@ -1,6 +1,26 @@
 //! The resolved document: what the compiler hands a translator.
 
+use crate::json_path::PathStep;
 use crate::position::Position;
+
+/// A name the resolved document declares, by one of the definition's declaration
+/// rules.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Declared {
+    pub scope: String,
+    /// For a scope named by its parent key, that key, such as the type a resource
+    /// is declared under.
+    pub scope_key: Option<String>,
+    /// The name as the rule spells it.
+    pub name: String,
+    /// The key that declares the name, as written.
+    pub key: String,
+    pub path: Vec<PathStep>,
+    pub key_position: Position,
+    /// The declared value, with the fields its key sets by the validator's
+    /// `child_values_from_parent_key`.
+    pub value: Value,
+}
 
 /// A value of the folded, expanded document, with where it was written.
 #[derive(Clone, Debug, PartialEq)]
@@ -51,8 +71,11 @@ pub struct Reference {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
-    /// A local, with its resolved value.
+    /// A local, with the resolved value at the reference's path.
     Local(Box<Value>),
+    /// A local whose path reaches into a value known only when the document is
+    /// used, such as a field of a call's result.
+    LocalUnknown,
     /// A builtin of a logical scope whose value the caller does not supply.
     Builtin,
     /// A declaration in the document.

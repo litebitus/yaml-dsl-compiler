@@ -2,8 +2,8 @@
 //! validates the result.
 
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use fancy_regex::Regex;
 
@@ -14,10 +14,10 @@ use crate::discover::Unit;
 use crate::fold::deep_merge;
 use crate::json_path::{PathSet, PathStep};
 use crate::macros::Expander;
-use crate::node::{Node, NodeKind};
-use crate::reference_scan::{NameReading, Reading, Scanner, Strictness};
-use crate::resolved::{MapEntry, Reference, Target, TemplatePart, Value, ValueKind};
-use crate::schema::{SchemaCache, schema_location};
+use crate::node::{Entry, Node, NodeKind};
+use crate::reference_scan::{NameReading, Reading, Resolver, Scanner, Strictness};
+use crate::resolved::{Declared, MapEntry, Reference, Target, TemplatePart, Value, ValueKind};
+use crate::schema::{SchemaCache, child_value, schema_location};
 use crate::source::FileSource;
 use crate::yaml_reader::parse;
 
@@ -34,6 +34,8 @@ pub trait BuiltinValues: Send + Sync {
 pub struct ResolvedUnit {
     pub unit: Unit,
     pub document: Value,
+    /// Every name the document declares, in the order it writes them.
+    pub declarations: Vec<Declared>,
     /// Whether the unit's document is a fragment, which is never compiled alone.
     pub fragment: bool,
 }
@@ -41,19 +43,18 @@ pub struct ResolvedUnit {
 /// What resolving needs that does not change from unit to unit.
 pub struct Resolution {
     definition: DslDefinition,
-    config_root: std::path::PathBuf,
+    config_root: PathBuf,
     scanner: Scanner,
     declaration_rules: Vec<CompiledDeclarationRule>,
     regions: BTreeMap<String, PathSet>,
     child_value_patterns: Vec<Regex>,
     schemas: SchemaCache,
+    /// Common layers, parsed once however many units fold over them.
+    common_layers: Mutex<BTreeMap<PathBuf, Result<Arc<Node>, Diagnostic>>>,
 }
 
 impl Resolution {
-    pub fn new(
-        definition: DslDefinition,
-        config_root: std::path::PathBuf,
-    ) -> Result<Self, Diagnostic> {
+    pub fn new(definition: DslDefinition, config_root: PathBuf) -> Result<Self, Diagnostic> {
         let scanner = Scanner::new(&definition)?;
         let declaration_rules = compile_rules(&definition.declarations)?;
         let mut regions = BTreeMap::new();
@@ -82,6 +83,7 @@ impl Resolution {
             regions,
             child_value_patterns,
             schemas: SchemaCache::default(),
+            common_layers: Mutex::default(),
         })
     }
 
@@ -111,29 +113,40 @@ impl Resolution {
         let overlay = self
             .parse(&unit.file, &text)
             .map_err(|diagnostic| vec![diagnostic])?;
-        let folded = match &unit.common_layer {
-            Some(common_layer) => {
-                let common_text =
-                    read(source, common_layer).map_err(|diagnostic| vec![diagnostic])?;
-                let common = self
-                    .parse(common_layer, &common_text)
-                    .map_err(|diagnostic| vec![diagnostic])?;
-                deep_merge(&common, &overlay)
-            }
-            None => overlay,
+        let common = match &unit.common_layer {
+            Some(common_layer) => Some(
+                self.common_layer(common_layer, source)
+                    .map_err(|diagnostic| vec![diagnostic])?,
+            ),
+            None => None,
         };
-        let document = value_of(&folded);
+        let first_fold = value_of(&fold_layers(common.as_ref(), &overlay));
         if location.fragment.is_some() {
             return Ok(ResolvedUnit {
                 unit: unit.clone(),
-                document,
+                document: first_fold,
+                declarations: Vec::new(),
                 fragment: true,
             });
         }
         let schema = self
             .schemas
             .load(&location.path, source)
-            .map_err(|message| vec![Diagnostic::at(&document.position, message)])?;
+            .map_err(|message| vec![Diagnostic::at(&first_fold.position, message)])?;
+
+        let key_expander = Expander::new(
+            &self.definition,
+            &self.scanner,
+            &schema.table,
+            self.raw_locals(&first_fold),
+        )
+        .map_err(|diagnostic| vec![diagnostic])?;
+        let mut resolve_key =
+            |reading: &NameReading<'_>| self.key_reading(reading, &key_expander, unit, builtins);
+        let overlay = self.resolve_keys(&overlay, &mut Vec::new(), &mut resolve_key);
+        let common =
+            common.map(|common| self.resolve_keys(&common, &mut Vec::new(), &mut resolve_key));
+        let document = value_of(&fold_layers(common.as_ref(), &overlay));
 
         let mut diagnostics = Vec::new();
         let raw_locals = self.raw_locals(&document);
@@ -156,15 +169,132 @@ impl Resolution {
         if diagnostics.is_empty() {
             diagnostics.extend(schema.validate(&resolved, &self.child_value_patterns));
         }
-        if diagnostics.is_empty() {
-            Ok(ResolvedUnit {
-                unit: unit.clone(),
-                document: resolved,
-                fragment: false,
-            })
-        } else {
-            Err(diagnostics)
+        if !diagnostics.is_empty() {
+            return Err(diagnostics);
         }
+        let declarations = Declarations::collect(
+            &resolved,
+            &self.declaration_rules,
+            &self.definition.scopes,
+            None,
+        )
+        .in_document_order()
+        .into_iter()
+        .map(|declared| Declared {
+            value: with_child_values(&declared.value, &declared.key, &self.child_value_patterns),
+            ..declared
+        })
+        .collect();
+        Ok(ResolvedUnit {
+            unit: unit.clone(),
+            document: resolved,
+            declarations,
+            fragment: false,
+        })
+    }
+
+    /// Reads a key's placeholder before the fold: a builtin the caller gives a
+    /// value, or a local whose value is a scalar. Anything else stays as written,
+    /// for the resolution after the fold.
+    fn key_reading(
+        &self,
+        reading: &NameReading<'_>,
+        expander: &Expander<'_>,
+        unit: &Unit,
+        builtins: Option<&dyn BuiltinValues>,
+    ) -> Reading {
+        if let Some(kind) = self.builtin_value(reading, unit, builtins) {
+            return Reading::Value(Value::new(kind, reading.position.clone()));
+        }
+        match expander.read_local(reading) {
+            Reading::Value(value) => Reading::Value(value),
+            Reading::Reference(Reference {
+                target: Target::Local(value),
+                ..
+            }) if value.scalar_text().is_some() => Reading::Value(*value),
+            _ => Reading::Keep,
+        }
+    }
+
+    /// The value the caller gives a builtin of a logical scope, where the reading
+    /// names one.
+    fn builtin_value(
+        &self,
+        reading: &NameReading<'_>,
+        unit: &Unit,
+        builtins: Option<&dyn BuiltinValues>,
+    ) -> Option<ValueKind> {
+        let scope_name = reading.rule.scope_name.as_str();
+        let scope = self.definition.scopes.get(scope_name)?;
+        if !scope.builtin_names.contains(&reading.name) {
+            return None;
+        }
+        builtins?.value(unit, scope_name, &reading.name)
+    }
+
+    fn resolve_keys(
+        &self,
+        node: &Node,
+        path: &mut Vec<PathStep>,
+        resolve: &mut Resolver<'_>,
+    ) -> Node {
+        let kind = match &node.kind {
+            NodeKind::Map(entries) => NodeKind::Map(
+                entries
+                    .iter()
+                    .map(|entry| {
+                        let key = self
+                            .scanner
+                            .scan_text(
+                                &entry.key,
+                                &entry.key_position,
+                                path,
+                                Strictness::Lenient,
+                                resolve,
+                            )
+                            .unwrap_or_else(|_| entry.key.clone());
+                        path.push(PathStep::Key(key.clone()));
+                        let value = self.resolve_keys(&entry.value, path, resolve);
+                        path.pop();
+                        Entry {
+                            key,
+                            key_position: entry.key_position.clone(),
+                            value,
+                        }
+                    })
+                    .collect(),
+            ),
+            NodeKind::List(items) => NodeKind::List(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        path.push(PathStep::Index(index));
+                        let item = self.resolve_keys(item, path, resolve);
+                        path.pop();
+                        item
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        };
+        Node::new(kind, node.position.clone())
+    }
+
+    fn common_layer(&self, path: &Path, source: &dyn FileSource) -> Result<Node, Diagnostic> {
+        let mut parsed = self
+            .common_layers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let layer = parsed.entry(path.to_path_buf()).or_insert_with(|| {
+            read(source, path)
+                .and_then(|text| self.parse(path, &text))
+                .map(Arc::new)
+        });
+        layer
+            .as_ref()
+            .map(|node| (**node).clone())
+            .map_err(Clone::clone)
     }
 
     fn parse(&self, path: &Path, text: &str) -> Result<Node, Diagnostic> {
@@ -200,6 +330,34 @@ impl Resolution {
             })
             .collect()
     }
+}
+
+fn fold_layers(common: Option<&Node>, overlay: &Node) -> Node {
+    match common {
+        Some(common) => deep_merge(common, overlay),
+        None => overlay.clone(),
+    }
+}
+
+/// `value` with the field its declaring key sets, placed first, unless the value
+/// writes the field itself.
+fn with_child_values(value: &Value, key: &str, patterns: &[Regex]) -> Value {
+    let (Some(entries), Some((field, field_value))) = (value.entries(), child_value(key, patterns))
+    else {
+        return value.clone();
+    };
+    if entries.iter().any(|entry| entry.key == field) {
+        return value.clone();
+    }
+    let set = MapEntry {
+        key: field,
+        key_position: value.position.clone(),
+        value: Value::string(field_value, value.position.clone()),
+    };
+    let entries = std::iter::once(set)
+        .chain(entries.iter().cloned())
+        .collect();
+    Value::new(ValueKind::Map(entries), value.position.clone())
 }
 
 fn read(source: &dyn FileSource, path: &Path) -> Result<String, Diagnostic> {
@@ -465,7 +623,11 @@ file_includes: ["**/mock-dsl.yml"]
 schema_search_paths: ["{config_root}/mock.schema.json"]
 placeholder:
   pattern: "\\$\\{(?<body>[^}\\n]*)\\}"
+  escape_prefix: "$"
   unscanned_paths: []
+validator:
+  child_values_from_parent_key:
+    - pattern: "^(?<field>name) (?<value>[a-z-]+)$"
 function:
   marker_function:
     call_marker: fn.
@@ -520,20 +682,97 @@ references:
     }
 
     fn resolve(document: &str) -> Result<Value, Vec<Diagnostic>> {
-        let source = MemorySource::new()
+        resolve_layers(None, document).map(|resolved| resolved.document)
+    }
+
+    fn resolve_layers(
+        common_layer: Option<&str>,
+        document: &str,
+    ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
+        let mut source = MemorySource::new()
             .with_file("/root/mock.schema.json", SCHEMA)
-            .with_file("/root/mock-dsl.yml", document);
+            .with_file("/root/dev/mock-dsl.yml", document);
+        if let Some(common_layer) = common_layer {
+            source = source.with_file("/root/mock-dsl.yml", common_layer);
+        }
         let resolution = Resolution::new(definition(), PathBuf::from("/root")).unwrap();
         let unit = Unit {
-            id: "mock-dsl.yml".into(),
-            file: PathBuf::from("/root/mock-dsl.yml"),
-            directory: PathBuf::from("/root"),
-            overlay: None,
-            common_layer: None,
+            id: "dev/mock-dsl.yml".into(),
+            file: PathBuf::from("/root/dev/mock-dsl.yml"),
+            directory: PathBuf::from("/root/dev"),
+            overlay: common_layer.map(|_| "dev".to_owned()),
+            common_layer: common_layer.map(|_| PathBuf::from("/root/mock-dsl.yml")),
         };
-        resolution
-            .resolve(&unit, &source, None)
-            .map(|resolved| resolved.document)
+        resolution.resolve(&unit, &source, None)
+    }
+
+    #[test]
+    fn an_escaped_placeholder_is_text_without_its_prefix() {
+        let document = resolve("queue:\n  q-$${a}:\n    label: cost $${missing}\n").unwrap();
+        assert_eq!(
+            json(document.get("queue").unwrap()),
+            serde_json::json!({"q-${a}": {"label": "cost ${missing}"}})
+        );
+    }
+
+    #[test]
+    fn a_key_placeholder_resolves_before_the_layers_fold() {
+        let resolved = resolve_layers(
+            Some("queue:\n  q-a:\n    x: 1\n"),
+            "locals:\n  suffix: a\nqueue:\n  q-${local.suffix}:\n    y: 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            json(resolved.document.get("queue").unwrap()),
+            serde_json::json!({"q-a": {"x": 1, "y": 2}})
+        );
+    }
+
+    #[test]
+    fn a_local_path_into_a_call_is_known_only_when_used() {
+        let document = resolve(concat!(
+            "locals:\n  policy fn.encode:\n    a: 1\n",
+            "queue:\n  q:\n    x: local.policy.statement\n",
+        ))
+        .unwrap();
+        let x = document
+            .get("queue")
+            .and_then(|queue| queue.get("q"))
+            .and_then(|q| q.get("x"))
+            .unwrap();
+        assert!(
+            matches!(
+                &x.kind,
+                ValueKind::Reference(Reference {
+                    target: Target::LocalUnknown,
+                    ..
+                })
+            ),
+            "{x:?}"
+        );
+    }
+
+    #[test]
+    fn declarations_come_in_document_order_with_their_key_fields() {
+        let resolved = resolve_layers(
+            None,
+            "queue:\n  zeta:\n    x: 1\n  name mock-orders:\n    x: 2\nlocals:\n  a: 1\n",
+        )
+        .unwrap();
+        let names: Vec<(&str, &str)> = resolved
+            .declarations
+            .iter()
+            .map(|declared| (declared.scope.as_str(), declared.name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [("ENTRY", "zeta"), ("ENTRY", "mock-orders"), ("local", "a")]
+        );
+        assert_eq!(
+            json(&resolved.declarations[1].value),
+            serde_json::json!({"name": "mock-orders", "x": 2})
+        );
+        assert_eq!(resolved.declarations[1].scope_key.as_deref(), Some("queue"));
     }
 
     fn json(value: &Value) -> serde_json::Value {

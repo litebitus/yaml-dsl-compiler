@@ -1,6 +1,6 @@
 # YAML DSL compiler
 
-A YAML DSL is a YAML document with a language on top: layers that fold into one document, placeholders, names declared in one place and referenced in another, functions, and macros that expand before the document is used. The YAML DSL editor makes such a document authorable. This compiler turns it into code.
+A YAML DSL is a YAML document with a language on top: layers that fold into one document, placeholders, names declared in one place and referenced in another, functions, and macros that expand before the document is used. The [YAML DSL editor](https://github.com/litebitus/vscode-yaml-dsl-editor) makes such a document authorable. This compiler turns it into code.
 
 The compiler is a Rust library. Nothing about a particular DSL is compiled into it: a DSL is a definition the caller hands over, in the shape of a DSL block of the editor's config, and the editor and the compiler read the same definition the same way. A program embeds the library, adds a translator for its DSL, and builds its own binary.
 
@@ -17,6 +17,16 @@ The compiler is a Rust library. Nothing about a particular DSL is compiled into 
 | Write | renders the output tree in a target language | library |
 
 A unit is compiled whole in one pass, from its documents to its output files. Units are independent and compile in parallel.
+
+### Fold
+
+The overlay is merged over its common layer, key by key, at any depth:
+
+- A map merges into the common layer's map; any other value replaces the common layer's.
+- A null deletes the key.
+- A `{}` or `[]` at a key the common layer holds is an opt-out and deletes the key. At a key the common layer does not hold, it is content.
+
+Keys are merged as they resolve: a placeholder in a key that reads a builtin the caller gives a value, or a local holding a scalar, is resolved in each layer before the fold. Any other placeholder in a key resolves after it.
 
 ## Inputs
 
@@ -74,7 +84,11 @@ What Resolve hands the translator: the folded, expanded document as a tree of va
 - A macro is expanded, so the resolved document holds what it expands to and never the macro call.
 - A function is not evaluated: it belongs to the target, so its call stays a call.
 - A placeholder in a scalar resolves to a constant where every name it reads holds one, and otherwise to a template of text and references.
+- A placeholder written after the definition's `escape_prefix` is text, with the prefix dropped.
 - A reference keeps both what it reads and what that resolves to, so the translator decides whether the target sees a reference or the value.
+- A reference to a local whose path reaches into a value known only when the document is used, such as a field of a call's result, resolves to the reference alone.
+
+Beside the document, Resolve lists the names it declares in document order: each with its scope, the key the scope is named by, the declaring key, its path and its value. The value carries the field its key sets by the definition's `child_values_from_parent_key`, first, unless the value writes that field itself.
 
 ## Translator
 
@@ -85,9 +99,12 @@ A trait the caller implements for one DSL and one target. It receives a unit's r
 | block | a type, its labels, and a body of attributes and blocks |
 | attribute | a name and a value |
 | scalar, list, map | as in the resolved document |
-| traversal | a reference in the target's syntax: a root name and the attributes and indexes after it |
+| traversal | a reference in the target's syntax: a root, a name or an expression, and the attributes, indexes and splats after it |
 | call | a function and its arguments |
-| template | text with traversals and calls interpolated |
+| template | text with expressions interpolated, and `if` and `for` directives, each tag with its strip markers |
+| conditional, `for` expression, operation, parentheses | the target's expressions, so a translator can write what a hand-written file holds |
+
+A map's key is a name, or an expression the target evaluates for the key.
 | comment | text attached to a file, block or attribute, written on the lines above it |
 
 Calls, traversals and templates are structured rather than text, so the writer lays them out. The output tree is the order the file is written in: the writer adds no sorting of its own, and what comes first is the translator's decision.
@@ -111,7 +128,13 @@ HCL style:
 - A blank line on each side of a block and of an attribute holding a multi-line map; none between other attributes.
 - `=` aligned within a run of single-line attributes; a multi-line value or a comment ends the run, and a heredoc stays in it.
 - A list or map of three or more items is written one item per line with a trailing comma; one or two items stay inline when the line fits.
-- No line is wider than 100 columns: a call that does not fit takes its arguments one per line, and a list or map that does not fit goes one item per line.
+- No line is wider than 100 columns where the language lets a line break:
+  - a call that does not fit takes its arguments one per line, or, where its last argument is a map or a list, wraps it: `merge(local.base, {` to `})`;
+  - a list or map that does not fit goes one item per line;
+  - a `for` expression that does not fit puts its brackets on lines of their own and breaks its collection and value;
+  - a conditional that does not fit keeps its condition on the first line and breaks its branches;
+  - an operation and an interpolation stay on one line.
+- An operation takes parentheses where precedence needs them, and an expression key takes them unless it is a template.
 - A multi-line string is an indented heredoc, `<<-EOT`.
 - What the writer writes, `terraform fmt` leaves unchanged.
 
@@ -153,6 +176,8 @@ One crate, `yaml-dsl-compiler`:
 | `Translator` | the caller's code turning a resolved unit into output files |
 | `OutputFile` | a path relative to the unit's directory, its target language, an optional comment and its body |
 | `CompiledUnit` | a unit and either its written files or every error it holds |
+| `ResolvedUnit` | a unit's resolved document and the names it declares |
+| `json_path` | the definition's JSONPath subset, selecting nodes of a resolved document in document order |
 
 The library renders files and returns them; writing them to disk is the caller's.
 
@@ -163,7 +188,7 @@ The repository's example binary is a caller like any other:
 - It reads a `yaml-dsl.yml`, takes its DSL block, and hands it to the library with a file source over the working tree that skips hidden directories and gitignored paths.
 - Its translator compiles an example DSL into HCL.
 - Its example folder is a workspace the editor opens: the documents are authored in the editor and compiled by the tool, and both read the same `yaml-dsl.yml`.
-- What a DSL compiles to is stated under the DSL block's `code_generation` key, which belongs to the tool and not to the library.
+- What a DSL compiles to is stated in the tool's own config, `mock-dsl-compiler.yml`, by the DSL's id: a code generator keeps its settings in a file of its own, never in the editor's `yaml-dsl.yml`.
 
 Its integration tests run the binary over the example folder, compare the written files, and run `terraform fmt -check` over the HCL it writes.
 

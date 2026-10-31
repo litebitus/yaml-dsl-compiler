@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use fancy_regex::Regex;
+use jsonschema::error::ValidationErrorKind;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::definition::DslDefinition;
@@ -137,7 +138,7 @@ impl LoadedSchema {
         let mut diagnostics: Vec<Diagnostic> = self
             .validator
             .iter_errors(&json)
-            .filter(|error| !instance.is_unknown(error.instance_path().as_str()))
+            .filter(|error| !instance.reads_unknown(error.instance_path().as_str(), error.kind()))
             .map(|error| {
                 let pointer = error.instance_path().as_str().to_owned();
                 Diagnostic::at(
@@ -197,19 +198,35 @@ impl Instance<'_> {
     /// A key such as `name mock-orders` sets the field `name` of the entry it keys,
     /// unless the entry writes the field itself.
     fn set_child_value(&self, key: &str, fields: &mut Map<String, JsonValue>) {
-        for pattern in self.child_value_patterns {
-            let Ok(Some(captures)) = pattern.captures(key) else {
-                continue;
-            };
-            let (Some(field), Some(value)) = (captures.name("field"), captures.name("value"))
-            else {
-                continue;
-            };
-            fields
-                .entry(field.as_str().to_owned())
-                .or_insert_with(|| JsonValue::String(value.as_str().to_owned()));
-            return;
+        if let Some((field, value)) = child_value(key, self.child_value_patterns) {
+            fields.entry(field).or_insert(JsonValue::String(value));
         }
+    }
+
+    /// Whether an error at `pointer` comes from a value not known when the document
+    /// compiles: the value itself, or a check that reads a value below it through a
+    /// subschema, or compares the values below it.
+    fn reads_unknown(&self, pointer: &str, kind: &ValidationErrorKind) -> bool {
+        if self.is_unknown(pointer) {
+            return true;
+        }
+        let reads_below = matches!(
+            kind,
+            ValidationErrorKind::AnyOf { .. }
+                | ValidationErrorKind::OneOfNotValid { .. }
+                | ValidationErrorKind::OneOfMultipleValid { .. }
+                | ValidationErrorKind::Not { .. }
+                | ValidationErrorKind::Contains
+                | ValidationErrorKind::UnevaluatedItems { .. }
+                | ValidationErrorKind::UnevaluatedProperties { .. }
+                | ValidationErrorKind::UniqueItems
+        );
+        let below = format!("{pointer}/");
+        reads_below
+            && self
+                .unknown
+                .iter()
+                .any(|unknown| unknown.starts_with(&below))
     }
 
     fn is_unknown(&self, pointer: &str) -> bool {
@@ -227,6 +244,19 @@ impl Instance<'_> {
             current = current.rsplit_once('/').map_or("", |(parent, _)| parent);
         }
     }
+}
+
+/// The field a key such as `name mock-orders` sets on the entry it keys, and the
+/// value it sets, by the first of `patterns` with `field` and `value` groups that
+/// matches.
+pub fn child_value(key: &str, patterns: &[Regex]) -> Option<(String, String)> {
+    patterns.iter().find_map(|pattern| {
+        let captures = pattern.captures(key).ok()??;
+        Some((
+            captures.name("field")?.as_str().to_owned(),
+            captures.name("value")?.as_str().to_owned(),
+        ))
+    })
 }
 
 fn escape_pointer(key: &str) -> String {
@@ -329,6 +359,30 @@ mod tests {
             "{}",
             diagnostics[0].message
         );
+    }
+
+    #[test]
+    fn a_check_through_a_subschema_reading_an_unknown_value_is_not_made() {
+        let text = r#"{
+            "type": "object",
+            "properties": {
+                "secrets": {
+                    "type": "object",
+                    "oneOf": [{"additionalProperties": {"type": "string"}}]
+                },
+                "count": {"oneOf": [{"type": "integer"}]}
+            }
+        }"#;
+        let source = MemorySource::new().with_file("/root/mock.schema.json", text);
+        let schema = LoadedSchema::read(Path::new("/root/mock.schema.json"), &source).unwrap();
+        let call = Value::new(ValueKind::Call(Call::new("mock", Vec::new())), position());
+        let document = map(vec![
+            ("secrets", map(vec![("token", call)])),
+            ("count", Value::string("three", position())),
+        ]);
+        let diagnostics = schema.validate(&document, &[]);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].message.starts_with("`count`"));
     }
 
     #[test]

@@ -1,0 +1,4 @@
+translators:
+  mock-dsl:
+    output_file: generated.tf
+    module_source: registry.example.com/mock/components

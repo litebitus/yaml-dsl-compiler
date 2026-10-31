@@ -193,6 +193,14 @@ impl<'a> Expander<'a> {
         }
     }
 
+    /// A local's reading outside any loop, such as in a key read before the fold.
+    pub fn read_local(&self, reading: &NameReading<'_>) -> Reading {
+        if self.local_scope.as_deref() != Some(reading.rule.scope_name.as_str()) {
+            return Reading::Keep;
+        }
+        self.read(reading, &Vec::new())
+    }
+
     /// The resolver of this phase: loop variables and locals; every other scope is
     /// left for resolution.
     fn read(&self, reading: &NameReading<'_>, bindings: &Bindings) -> Reading {
@@ -210,7 +218,11 @@ impl<'a> Expander<'a> {
                 &reading.path,
                 self.path_separator.as_deref().unwrap_or("."),
             ) {
-                Ok(value) => Reading::Value(value),
+                Ok(Some(value)) => Reading::Value(value),
+                Ok(None) => Reading::Error(format!(
+                    "`{}` reaches into a value known only when the document is used",
+                    reading.text
+                )),
                 Err(message) => Reading::Error(format!("`{}`: {message}", reading.text)),
             };
         }
@@ -222,26 +234,28 @@ impl<'a> Expander<'a> {
                 Ok(value) => value,
                 Err(diagnostic) => return Reading::Error(diagnostic.message),
             };
-            let value = match self.path_separator.as_deref() {
+            let stepped = match self.path_separator.as_deref() {
                 Some(separator) => match step_into(&value, &reading.path, separator) {
-                    Ok(value) => value,
+                    Ok(stepped) => stepped,
                     Err(message) => {
                         return Reading::Error(format!("`{}`: {message}", reading.text));
                     }
                 },
-                None => value,
+                None => Some(value.clone()),
             };
-            if !reading.whole {
-                return Reading::Value(value);
-            }
-            return Reading::Reference(Reference {
+            let reference = |target: Target| Reference {
                 scope: scope.to_owned(),
                 scope_key: None,
                 name: reading.name.clone(),
                 path: reading.path.clone(),
                 text: reading.text.clone(),
-                target: Target::Local(Box::new(value)),
-            });
+                target,
+            };
+            return match stepped {
+                Some(stepped) if !reading.whole => Reading::Value(stepped),
+                Some(stepped) => Reading::Reference(reference(Target::Local(Box::new(stepped)))),
+                None => Reading::Reference(reference(Target::LocalUnknown)),
+            };
         }
         Reading::Keep
     }
@@ -841,9 +855,11 @@ fn merge_pair(
 
 /// Steps into `value` along `path`, the text after a name: map keys, or list
 /// indexes counted from 0, each after `separator`.
-fn step_into(value: &Value, path: &str, separator: &str) -> Result<Value, String> {
+/// The value at `path`, or `None` where the path goes into a value known only
+/// when the document is used, such as a call's result.
+fn step_into(value: &Value, path: &str, separator: &str) -> Result<Option<Value>, String> {
     if path.is_empty() {
-        return Ok(value.clone());
+        return Ok(Some(value.clone()));
     }
     let rest = path
         .strip_prefix(separator)
@@ -859,6 +875,9 @@ fn step_into(value: &Value, path: &str, separator: &str) -> Result<Value, String
                 .parse::<usize>()
                 .ok()
                 .and_then(|index| items.get(index).cloned()),
+            ValueKind::Call(_) | ValueKind::Reference(_) | ValueKind::Template(_) => {
+                return Ok(None);
+            }
             _ => None,
         };
         current = next
@@ -866,7 +885,7 @@ fn step_into(value: &Value, path: &str, separator: &str) -> Result<Value, String
             .local_value()
             .clone();
     }
-    Ok(current)
+    Ok(Some(current))
 }
 
 /// A table default, as a value placed at the call.

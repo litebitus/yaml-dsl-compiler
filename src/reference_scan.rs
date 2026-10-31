@@ -49,6 +49,7 @@ pub type Resolver<'r> = dyn FnMut(&NameReading<'_>) -> Reading + 'r;
 
 pub struct Scanner {
     placeholder: Option<Regex>,
+    escape_prefix: Option<String>,
     rules: Vec<CompiledRule>,
     unscanned: PathSet,
 }
@@ -86,6 +87,10 @@ impl Scanner {
         };
         Ok(Self {
             placeholder,
+            escape_prefix: definition
+                .placeholder
+                .as_ref()
+                .and_then(|placeholder| placeholder.escape_prefix.clone()),
             rules,
             unscanned,
         })
@@ -182,6 +187,21 @@ impl Scanner {
             })?;
             if whole_match.end() == whole_match.start() {
                 break;
+            }
+            let escape = self
+                .escape_prefix
+                .as_deref()
+                .filter(|prefix| text[cursor..whole_match.start()].ends_with(prefix));
+            if let Some(prefix) = escape {
+                let kept = if strictness == Strictness::Strict {
+                    whole_match.start() - prefix.len()
+                } else {
+                    whole_match.start()
+                };
+                push_text(&mut parts, &text[cursor..kept]);
+                push_text(&mut parts, whole_match.as_str());
+                cursor = whole_match.end();
+                continue;
             }
             push_text(&mut parts, &text[cursor..whole_match.start()]);
             let body_text = if placeholder

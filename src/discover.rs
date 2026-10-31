@@ -74,65 +74,131 @@ fn layered_units(
     let mut units = Vec::new();
     let mut taken_common_layers = BTreeSet::new();
     for file in files {
-        let components: Vec<&str> = file.split('/').collect();
-        let directories = &components[..components.len() - 1];
-        let overlay_index = match layers.common_layer_discovery {
-            CommonLayerDiscovery::Parent => directories.len().checked_sub(1).filter(|&index| {
-                layers
-                    .overlay_folders
-                    .iter()
-                    .any(|folder| folder == directories[index])
-            }),
-            _ => directories.iter().rposition(|directory| {
-                layers
-                    .overlay_folders
-                    .iter()
-                    .any(|folder| folder == directory)
-            }),
-        };
-        let Some(overlay_index) = overlay_index else {
+        let Some(unit) = overlay_unit(layers, config_root, source, file) else {
             continue;
         };
-        let file_name = components[components.len() - 1];
-        let concern_below = overlay_index + 1 < directories.len();
-        let concern = directories[directories.len() - 1];
-        let common_directory = directories[..overlay_index].join("/");
-        let candidates = layers
-            .common_layer_files
-            .get(file_name)
-            .cloned()
-            .unwrap_or_else(|| vec![file_name.to_owned()]);
-        let common_layer = candidates
-            .iter()
-            .filter(|candidate| concern_below || !candidate.contains("{concern}"))
-            .map(|candidate| {
-                join_relative(&common_directory, &candidate.replace("{concern}", concern))
-            })
-            .find(|candidate| source.exists(&config_root.join(candidate)));
-        if let Some(common_layer) = &common_layer {
-            taken_common_layers.insert(common_layer.clone());
+        if let Some(common_layer) = &unit.common_layer
+            && let Ok(relative) = common_layer.strip_prefix(config_root)
+        {
+            taken_common_layers.insert(slash_path(relative));
         }
-        let mut unit = lone_unit(
-            config_root,
-            file,
-            Some(directories[overlay_index].to_owned()),
-        );
-        unit.common_layer = common_layer.map(|common_layer| config_root.join(common_layer));
         units.push(unit);
     }
     for file in files {
-        let under_overlay = file.split('/').rev().skip(1).any(|directory| {
-            layers
-                .overlay_folders
-                .iter()
-                .any(|folder| folder == directory)
-        });
-        if !under_overlay && !taken_common_layers.contains(file) {
+        if !under_overlay(layers, file) && !taken_common_layers.contains(file) {
             units.push(lone_unit(config_root, file, None));
         }
     }
     units.sort_by(|first, second| first.id.cmp(&second.id));
     Ok(units)
+}
+
+/// The unit of the document at `document`, read without listing any directory:
+/// an overlay with the common layer it takes, or a lone document. `None` where the
+/// DSL's file patterns do not select the document.
+pub fn unit_of(
+    definition: &DslDefinition,
+    config_root: &Path,
+    document: &Path,
+    source: &dyn FileSource,
+) -> Result<Option<Unit>, Diagnostic> {
+    let Some(file) = selected_file(definition, config_root, document)? else {
+        return Ok(None);
+    };
+    let Some(layers) = &definition.layers else {
+        return Ok(Some(lone_unit(config_root, &file, None)));
+    };
+    if layers.common_layer_discovery == CommonLayerDiscovery::OverlayIncludes {
+        return Err(Diagnostic::unplaced(format!(
+            "DSL `{}`: common_layer_discovery `overlay_includes` is not supported yet",
+            definition.id
+        )));
+    }
+    Ok(Some(
+        overlay_unit(layers, config_root, source, &file)
+            .unwrap_or_else(|| lone_unit(config_root, &file, None)),
+    ))
+}
+
+/// Whether the DSL's file patterns select the document at `document`.
+pub fn selects(
+    definition: &DslDefinition,
+    config_root: &Path,
+    document: &Path,
+) -> Result<bool, Diagnostic> {
+    Ok(selected_file(definition, config_root, document)?.is_some())
+}
+
+fn selected_file(
+    definition: &DslDefinition,
+    config_root: &Path,
+    document: &Path,
+) -> Result<Option<String>, Diagnostic> {
+    let Ok(relative) = document.strip_prefix(config_root) else {
+        return Ok(None);
+    };
+    let relative = slash_path(relative);
+    let includes = glob_set(&definition.file_includes)?;
+    let excludes = glob_set(&definition.file_excludes)?;
+    let selected = relative.rsplit('/').next() != Some(CONFIG_FILE_NAME)
+        && includes.is_match(&relative)
+        && !excludes.is_match(&relative);
+    Ok(selected.then_some(relative))
+}
+
+fn under_overlay(layers: &Layers, file: &str) -> bool {
+    file.split('/').rev().skip(1).any(|directory| {
+        layers
+            .overlay_folders
+            .iter()
+            .any(|folder| folder == directory)
+    })
+}
+
+/// The overlay unit of `file`, with the common layer it takes, where `file` sits
+/// under one of the layers' overlay folders.
+fn overlay_unit(
+    layers: &Layers,
+    config_root: &Path,
+    source: &dyn FileSource,
+    file: &str,
+) -> Option<Unit> {
+    let components: Vec<&str> = file.split('/').collect();
+    let directories = &components[..components.len() - 1];
+    let is_overlay_folder = |directory: &&str| {
+        layers
+            .overlay_folders
+            .iter()
+            .any(|folder| folder == directory)
+    };
+    let overlay_index = match layers.common_layer_discovery {
+        CommonLayerDiscovery::Parent => directories
+            .len()
+            .checked_sub(1)
+            .filter(|&index| is_overlay_folder(&directories[index])),
+        _ => directories.iter().rposition(is_overlay_folder),
+    }?;
+    let file_name = components[components.len() - 1];
+    let concern_below = overlay_index + 1 < directories.len();
+    let concern = directories[directories.len() - 1];
+    let common_directory = directories[..overlay_index].join("/");
+    let candidates = layers
+        .common_layer_files
+        .get(file_name)
+        .cloned()
+        .unwrap_or_else(|| vec![file_name.to_owned()]);
+    let common_layer = candidates
+        .iter()
+        .filter(|candidate| concern_below || !candidate.contains("{concern}"))
+        .map(|candidate| join_relative(&common_directory, &candidate.replace("{concern}", concern)))
+        .find(|candidate| source.exists(&config_root.join(candidate)));
+    let mut unit = lone_unit(
+        config_root,
+        file,
+        Some(directories[overlay_index].to_owned()),
+    );
+    unit.common_layer = common_layer.map(|common_layer| config_root.join(common_layer));
+    Some(unit)
 }
 
 fn lone_unit(config_root: &Path, file: &str, overlay: Option<String>) -> Unit {
@@ -261,5 +327,42 @@ mod tests {
             units[1].common_layer.as_deref(),
             Some(Path::new("/root/group/mock-dsl.yml"))
         );
+    }
+
+    #[test]
+    fn one_document_finds_its_unit_without_a_listing() {
+        let definition = definition(
+            r#"{"overlay_folders": ["overlay-1"], "common_layer_discovery": "ancestor"}"#,
+        );
+        let source = source(&["group/mock-dsl.yml", "lone/mock-dsl.yml"]);
+        let root = Path::new("/root");
+        let overlay = unit_of(
+            &definition,
+            root,
+            Path::new("/root/group/overlay-1/concern-1/mock-dsl.yml"),
+            &source,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            overlay.common_layer.as_deref(),
+            Some(Path::new("/root/group/mock-dsl.yml"))
+        );
+        let lone = unit_of(
+            &definition,
+            root,
+            Path::new("/root/lone/mock-dsl.yml"),
+            &source,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((lone.overlay, lone.common_layer), (None, None));
+        let other = unit_of(
+            &definition,
+            root,
+            Path::new("/root/lone/other.yml"),
+            &source,
+        );
+        assert_eq!(other.unwrap(), None);
     }
 }

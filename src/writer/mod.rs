@@ -5,7 +5,7 @@ mod json;
 mod yaml;
 
 use crate::diagnostic::Diagnostic;
-use crate::output::OutputFile;
+use crate::output::{ObjectKey, OutputFile};
 
 /// The longest line a writer writes where the language lets it break the line.
 pub const MAX_LINE_WIDTH: usize = 100;
@@ -26,4 +26,12 @@ pub fn write_file(file: &OutputFile) -> Result<String, Diagnostic> {
     written.map_err(|message| {
         Diagnostic::unplaced(format!("writing {}: {message}", file.path.display()))
     })
+}
+
+/// A map key as a name, for a language whose keys are never expressions.
+fn key_name<'k>(key: &'k ObjectKey, language: &str) -> Result<&'k str, String> {
+    match key {
+        ObjectKey::Name(name) => Ok(name),
+        ObjectKey::Expression(_) => Err(format!("{language} has no expressions as map keys")),
+    }
 }

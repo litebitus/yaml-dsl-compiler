@@ -4,12 +4,13 @@
 use std::path::PathBuf;
 
 use yaml_dsl_compiler::output::{
-    Attribute, Block, BodyItem, Expression, FunctionCall, OutputFile, TemplatePart, Traversal,
+    Attribute, Block, BodyItem, Expression, FunctionCall, Interpolation, ObjectKey, OutputFile,
+    TemplatePart, Traversal,
 };
 use yaml_dsl_compiler::resolved::{self, Reference, Target, Value, ValueKind};
 use yaml_dsl_compiler::{Diagnostic, ResolvedUnit, TargetLanguage, Translator};
 
-use crate::CodeGeneration;
+use crate::TranslatorSettings;
 
 const VERSION_KEY: &str = "version";
 const LOCALS_KEY: &str = "locals";
@@ -17,14 +18,14 @@ const OUTPUTS_KEY: &str = "outputs";
 const MODULE_OUTPUT_NAME: &str = "o";
 
 pub struct MockTranslator {
-    code_generation: CodeGeneration,
+    settings: TranslatorSettings,
     config_root: PathBuf,
 }
 
 impl MockTranslator {
-    pub fn new(code_generation: CodeGeneration, config_root: PathBuf) -> Self {
+    pub fn new(settings: TranslatorSettings, config_root: PathBuf) -> Self {
         Self {
-            code_generation,
+            settings,
             config_root,
         }
     }
@@ -64,16 +65,15 @@ impl Translator for MockTranslator {
                 entry_type => {
                     for declared in entry.value.entries().unwrap_or_default() {
                         let name = entry_name(&declared.key);
-                        let mut config =
-                            vec![("name".to_owned(), Expression::String(name.to_owned()))];
+                        let mut config: Vec<(ObjectKey, Expression)> =
+                            vec![("name".into(), Expression::String(name.to_owned()))];
                         for field in declared.value.entries().unwrap_or_default() {
                             config.push((
-                                field.key.clone(),
+                                field.key.clone().into(),
                                 expression(&field.value, &mut diagnostics),
                             ));
                         }
-                        let source =
-                            format!("{}//{entry_type}", self.code_generation.module_source);
+                        let source = format!("{}//{entry_type}", self.settings.module_source);
                         let module = Block::new(
                             "module",
                             vec![module_name(entry_type, name)],
@@ -101,7 +101,7 @@ impl Translator for MockTranslator {
             document_path.display()
         );
         Ok(vec![OutputFile {
-            path: self.code_generation.output_file.clone(),
+            path: self.settings.output_file.clone(),
             language: TargetLanguage::Hcl,
             comment: Some(comment),
             body,
@@ -137,7 +137,12 @@ fn expression(value: &Value, diagnostics: &mut Vec<Diagnostic>) -> Expression {
         ValueKind::Map(entries) => Expression::Map(
             entries
                 .iter()
-                .map(|entry| (entry.key.clone(), expression(&entry.value, diagnostics)))
+                .map(|entry| {
+                    (
+                        entry.key.clone().into(),
+                        expression(&entry.value, diagnostics),
+                    )
+                })
                 .collect(),
         ),
         ValueKind::Reference(reference) => reference_expression(reference, value, diagnostics),
@@ -156,7 +161,7 @@ fn expression(value: &Value, diagnostics: &mut Vec<Diagnostic>) -> Expression {
                 .map(|part| match part {
                     resolved::TemplatePart::Text(text) => TemplatePart::Text(text.clone()),
                     resolved::TemplatePart::Reference(reference) => TemplatePart::Interpolation(
-                        reference_expression(reference, value, diagnostics),
+                        Interpolation::new(reference_expression(reference, value, diagnostics)),
                     ),
                 })
                 .collect(),

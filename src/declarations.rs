@@ -6,7 +6,7 @@ use crate::definition::{DeclarationRule, KeyToken, NameSource, NameSpelling, Sco
 use crate::diagnostic::Diagnostic;
 use crate::json_path::{PathPattern, PathStep};
 use crate::position::Position;
-use crate::resolved::{Value, ValueKind};
+use crate::resolved::{Declared, Value, ValueKind};
 
 #[derive(Clone, Debug)]
 pub struct Declaration {
@@ -22,6 +22,7 @@ pub struct Declarations {
     names: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<Declaration>>>>,
     /// Scopes, and parent keys, a key declares every name of.
     every_name: BTreeMap<String, Vec<String>>,
+    ordered: Vec<Declared>,
 }
 
 pub struct CompiledDeclarationRule {
@@ -154,6 +155,15 @@ impl Declarations {
                 NameSpelling::AsWritten => name,
                 NameSpelling::DashesAsUnderscores => name.replace('-', "_"),
             };
+            self.ordered.push(Declared {
+                scope: rule.scope_name.clone(),
+                scope_key: (!parent_key.is_empty()).then(|| parent_key.clone()),
+                name: name.clone(),
+                key: key.unwrap_or_default().to_owned(),
+                path: path.to_vec(),
+                key_position: position.clone(),
+                value: value.clone(),
+            });
             self.names
                 .entry(rule.scope_name.clone())
                 .or_default()
@@ -167,6 +177,11 @@ impl Declarations {
                     value: value.clone(),
                 });
         }
+    }
+
+    /// Every declaration, in the order the document writes them.
+    pub fn in_document_order(self) -> Vec<Declared> {
+        self.ordered
     }
 
     pub fn find(&self, scope: &str, scope_key: Option<&str>, name: &str) -> Option<&[Declaration]> {

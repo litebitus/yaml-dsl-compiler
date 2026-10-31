@@ -30,7 +30,7 @@ A caller supplies three things and builds its own binary:
 make example
 ```
 
-What a DSL compiles to is stated under its block's `code_generation` key, which the example tool reads and the library does not.
+What a DSL compiles to is stated in the tool's own config, `mock-dsl-compiler.yml`, beside the `yaml-dsl.yml` of the [YAML DSL editor](https://github.com/litebitus/vscode-yaml-dsl-editor).
 
 ## Development
 

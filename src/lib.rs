@@ -7,7 +7,7 @@ mod diagnostic;
 mod discover;
 mod fold;
 mod function_table;
-mod json_path;
+pub mod json_path;
 mod macros;
 mod node;
 pub mod output;
@@ -26,6 +26,7 @@ pub use compiler::{
 pub use definition::DslDefinition;
 pub use diagnostic::Diagnostic;
 pub use discover::Unit;
+pub use function_table::{CallKey, parse_call_key};
 pub use node::{Entry, Node, NodeKind};
 pub use position::Position;
 pub use source::{FileSource, MemorySource};
