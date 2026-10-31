@@ -1,0 +1,102 @@
+version: "1"
+dsls:
+  - id: mock-dsl
+    file_includes: ["{config_root}/**/mock-dsl.yml"]
+    file_excludes: []
+    schema_search_paths: ["{config_root}/mock-dsl.schema.json"]
+    layers:
+      overlay_folders: [dev, production]
+      common_layer_discovery: parent
+      duplicate_check:
+        depth: 2
+        key_depths: {}
+        skip_keys: [locals, outputs]
+    placeholder:
+      pattern: "\\$\\{(?<body>[^}\\n]*)\\}"
+      unscanned_paths: []
+    function:
+      definitions: [schema]
+      call_result_reference_positions: []
+      calls_not_allowed_at:
+        - { path: "$.*", skip_keys: [] }
+      marker_function:
+        call_marker: fn.
+        splat_operator: "*"
+        calls_without_name_allowed: true
+    locals:
+      scope_name: local
+      path_separator: "."
+    loops:
+      scope_name: LOOP
+    validator:
+      child_values_from_parent_key:
+        - pattern: "^(?<field>name) (?<value>[a-z0-9-]+)$"
+    key_sort_orders: []
+    scopes:
+      ENTRY:
+        regions: ["$"]
+        later_items_of_declaring_list: false
+        named_by_parent_key: true
+        builtin_names: []
+      GLOBAL:
+        regions: ["$"]
+        later_items_of_declaring_list: false
+        named_by_parent_key: false
+        builtin_names: [env]
+      local:
+        regions: ["$"]
+        later_items_of_declaring_list: false
+        named_by_parent_key: false
+        builtin_names: []
+      LOOP:
+        regions: ["$"]
+        later_items_of_declaring_list: false
+        named_by_parent_key: false
+        builtin_names: []
+    declarations:
+      - path: "$.locals.*"
+        skip_keys: []
+        exclude_candidates: []
+        name_source: key
+        key_token: first_word
+        name_spelling: as_written
+        meta_argument_name: null
+        declares_every_name: false
+        scope_name: local
+      - path: "$.*.*"
+        skip_keys: [locals, outputs]
+        exclude_candidates: []
+        name_source: key
+        key_token: last_word
+        name_spelling: dashes_as_underscores
+        meta_argument_name: null
+        declares_every_name: false
+        scope_name: ENTRY
+    references:
+      - pattern: "^ref (?<type>[a-z0-9_]+)\\.(?<name>[a-z0-9_]+)"
+        positions: [whole_scalar]
+        text_after_name_allowed: true
+        scope_name: ENTRY
+        scope_group: type
+        name_group: name
+      - pattern: "^local\\.(?<name>[a-z0-9_]+)"
+        positions: [whole_scalar, whole_placeholder, placeholder_in_text]
+        text_after_name_allowed: true
+        scope_name: local
+        scope_group: null
+        name_group: name
+      - pattern: "^~(?<name>[a-z_][a-z0-9_]*)"
+        positions: [whole_scalar, whole_placeholder, placeholder_in_text]
+        text_after_name_allowed: true
+        scope_name: LOOP
+        scope_group: null
+        name_group: name
+      - pattern: "^(?<name>[a-z_]+)$"
+        positions: [whole_placeholder, placeholder_in_text]
+        text_after_name_allowed: false
+        scope_name: GLOBAL
+        scope_group: null
+        name_group: name
+    code_generation:
+      output_file: generated.tf
+      module_source: registry.example.com/mock/components

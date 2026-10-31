@@ -1,0 +1,22 @@
+[package]
+name = "yaml-dsl-compiler"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "Compiles config-defined YAML DSLs into code: folds layers, expands macros, resolves references, and writes the target language."
+readme = "README.md"
+repository = "https://github.com/litebitus/yaml-dsl-compiler"
+keywords = ["yaml", "dsl", "compiler", "hcl", "codegen"]
+categories = ["compilers", "development-tools"]
+
+[workspace]
+members = ["examples/mock-dsl-compiler"]
+
+[dependencies]
+fancy-regex = "0.20.0"
+globset = "0.4.21"
+jsonschema = { version = "0.60.2", default-features = false }
+rayon = "1.12.0"
+saphyr-parser = "0.3.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }

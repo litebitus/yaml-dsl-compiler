@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-yaml-dsl-functions": {
+    "jsonencode": {
+      "description": "Encodes a value as JSON when the document is used.",
+      "arguments": [
+        { "name": "value", "type": "any", "required": true, "repeated": false, "description": "The value to encode." }
+      ]
+    },
+    "loop": {
+      "description": "Repeats the body once per item of the collection: a map body yields a map, a list body of one element yields a list.",
+      "arguments": [
+        { "name": "in", "type": "any", "required": true, "repeated": false, "description": "The collection, a list or a map." },
+        { "name": "body", "type": "any", "required": true, "repeated": false, "description": "What each pass yields: a map's entries, or a list's one element." },
+        { "name": "for", "type": "list", "required": false, "repeated": false, "default": ["it"], "description": "The loop variables: one binds each item, two bind each key or index and its value." }
+      ],
+      "macro": { "kind": "loop", "loop_variables": "for", "collection": "in", "body": "body" }
+    },
+    "merge": {
+      "description": "Merges maps, each content over the one before it.",
+      "arguments": [
+        { "name": "contents", "type": "map", "required": true, "repeated": true, "description": "The maps to merge, in order." }
+      ],
+      "macro": { "kind": "merge", "content": "contents", "merge_behavior": "shallow" }
+    }
+  },
+  "$defs": {
+    "ref": {
+      "description": "A reference to an entry, `ref <type>.<name>`, or to one of its fields, `ref <type>.<name>.<field>`.",
+      "type": "string",
+      "pattern": "^ref [a-z0-9_]+\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$"
+    },
+    "local": {
+      "description": "A named value from the document's `locals:` block, `local.<name>`, standing for the whole value.",
+      "type": "string",
+      "pattern": "^local\\.[a-z0-9_]+$"
+    },
+    "literal_string": {
+      "description": "A plain string that is not a `ref` or a bare `local`.",
+      "type": "string",
+      "not": { "anyOf": [{ "$ref": "#/$defs/ref" }, { "$ref": "#/$defs/local" }] }
+    },
+    "string_or_ref": {
+      "description": "A literal string, a `ref`, or a bare `local`.",
+      "oneOf": [
+        { "$ref": "#/$defs/literal_string" },
+        { "$ref": "#/$defs/ref" },
+        { "$ref": "#/$defs/local" }
+      ]
+    },
+    "string_list_or_ref": {
+      "description": "A list of (literal string | `ref` | `local`), or a single `ref` or bare `local` resolving to a whole list.",
+      "oneOf": [
+        { "type": "array", "items": { "$ref": "#/$defs/string_or_ref" } },
+        { "$ref": "#/$defs/ref" },
+        { "$ref": "#/$defs/local" }
+      ]
+    },
+    "string_map_or_ref": {
+      "description": "A map of string to (literal string | `ref` | `local`), or a single `ref` or bare `local` resolving to a whole map.",
+      "oneOf": [
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/string_or_ref" } },
+        { "$ref": "#/$defs/ref" },
+        { "$ref": "#/$defs/local" }
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": { "type": "string", "description": "[required] The version of the components every entry uses." },
+    "locals": { "type": "object", "description": "Named values the document references as `local.<name>`." },
+    "key": {
+      "type": "object",
+      "description": "The encryption keys, by name.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "patternProperties": { "^[A-Za-z_][A-Za-z0-9_-]* fn\\.[a-z0-9_]+\\*?$": {} },
+        "properties": {
+          "name": { "type": "string", "description": "[required] The key's name." },
+          "rotation": { "type": "boolean", "description": "[optional] Whether the key rotates yearly." },
+          "policy": { "type": "string", "description": "[optional] The key's policy, as JSON." }
+        }
+      }
+    },
+    "queue": {
+      "type": "object",
+      "description": "The queues, by name.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "visibility"],
+        "properties": {
+          "name": { "type": "string", "description": "[required] The queue's name." },
+          "visibility": { "type": "integer", "description": "[required] How long a received message stays hidden, in seconds." },
+          "kms_key": { "$ref": "#/$defs/string_or_ref", "description": "[optional] The key messages are encrypted with." },
+          "consumers": { "$ref": "#/$defs/string_list_or_ref", "description": "[optional] The services that read the queue." },
+          "dead_letter": { "$ref": "#/$defs/string_or_ref", "description": "[optional] The queue failed messages move to." },
+          "tags": { "$ref": "#/$defs/string_map_or_ref", "description": "[optional] The queue's tags." }
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "description": "The values the stack exports, by name.",
+      "additionalProperties": { "$ref": "#/$defs/string_or_ref" }
+    }
+  }
+}

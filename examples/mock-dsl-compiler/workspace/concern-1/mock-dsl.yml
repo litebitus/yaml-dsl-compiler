@@ -1,0 +1,34 @@
+version: 1.2.3
+
+locals:
+  consumers: [mock-billing, mock-shipping, mock-audit]
+  default_tags:
+    team: mock
+    tier: gold
+  streams: [payments, refunds]
+
+key:
+  name mock-main:
+    rotation: true
+    policy fn.jsonencode:
+      Version: "2012-10-17"
+      Statement: []
+
+queue:
+  name mock-orders:
+    visibility: 30
+    kms_key: ref key.mock_main.arn
+    consumers: local.consumers
+    tags: local.default_tags
+  fn.loop:
+    in: local.streams
+    body:
+      name mock-${~it}:
+        visibility: 60
+        kms_key: ref key.mock_main.arn
+        tags:
+          fn.merge: local.default_tags
+          stream: ${~it}
+
+outputs:
+  orders_queue_url: ref queue.mock_orders.url

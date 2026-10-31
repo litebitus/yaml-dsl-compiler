@@ -1,0 +1,9 @@
+locals:
+  streams: [payments, refunds, disputes]
+
+queue:
+  name mock-orders:
+    dead_letter: mock-orders-${env}-failed
+    tags:
+      team: mock
+      tier: platinum

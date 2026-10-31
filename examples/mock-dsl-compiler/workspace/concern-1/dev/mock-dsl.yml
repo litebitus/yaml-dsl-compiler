@@ -1,0 +1,4 @@
+queue:
+  name mock-orders:
+    visibility: 10
+    dead_letter: mock-orders-${env}-failed
