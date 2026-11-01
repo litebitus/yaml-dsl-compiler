@@ -10,7 +10,8 @@ use crate::diagnostic::Diagnostic;
 use crate::discover::{Unit, selects, unit_of, units};
 use crate::output::OutputFile;
 use crate::resolve::Resolution;
-pub use crate::resolve::{BuiltinValues, ResolvedUnit};
+pub use crate::resolve::{BuiltinValues, ResolveOptions, ResolvedUnit};
+use crate::schema_url_copies::SchemaUrlCopies;
 use crate::source::FileSource;
 use crate::writer::write_file;
 
@@ -87,19 +88,29 @@ impl Compiler {
     }
 
     pub fn resolve(&self, unit: &Unit) -> Result<ResolvedUnit, Vec<Diagnostic>> {
+        let options = ResolveOptions {
+            builtins: self.builtins.as_deref(),
+            schema_search_paths: None,
+        };
         self.resolution
-            .resolve(unit, self.source.as_ref(), self.builtins.as_deref())
+            .resolve(unit, self.source.as_ref(), &options)
     }
 
-    /// Resolves `unit` with `builtins` giving its builtin names their values, for a
-    /// caller whose values differ from one resolution of a document to the next.
-    pub fn resolve_with_builtins(
+    /// Resolves `unit` with `options`, for a caller whose builtin values or schema
+    /// differ from one resolution of a document to the next.
+    pub fn resolve_with(
         &self,
         unit: &Unit,
-        builtins: &dyn BuiltinValues,
+        options: &ResolveOptions<'_>,
     ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
+        self.resolution.resolve(unit, self.source.as_ref(), options)
+    }
+
+    /// Schema URLs are downloaded, and a copy of each is kept in `directory`.
+    pub fn with_schema_url_copies(mut self, directory: impl Into<PathBuf>) -> Self {
         self.resolution
-            .resolve(unit, self.source.as_ref(), Some(builtins))
+            .set_schema_url_copies(SchemaUrlCopies::new(directory));
+        self
     }
 
     /// Compiles `unit`. A fragment compiles to no files.

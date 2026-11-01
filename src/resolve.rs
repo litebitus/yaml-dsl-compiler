@@ -18,6 +18,7 @@ use crate::node::{Entry, Node, NodeKind};
 use crate::reference_scan::{NameReading, Reading, Resolver, Scanner, Strictness};
 use crate::resolved::{Declared, MapEntry, Reference, Target, TemplatePart, Value, ValueKind};
 use crate::schema::{SchemaCache, child_value, schema_location};
+use crate::schema_url_copies::SchemaUrlCopies;
 use crate::source::FileSource;
 use crate::yaml_reader::parse;
 
@@ -27,6 +28,16 @@ pub trait BuiltinValues: Send + Sync {
     /// The value of `scope`'s builtin `name` in `unit`; `None` leaves it a reference
     /// for the target to read.
     fn value(&self, unit: &Unit, scope: &str, name: &str) -> Option<ValueKind>;
+}
+
+/// What one resolution takes beside its unit.
+#[derive(Clone, Copy, Default)]
+pub struct ResolveOptions<'o> {
+    /// The values of the unit's builtin names.
+    pub builtins: Option<&'o dyn BuiltinValues>,
+    /// Where the schema is looked for when the document's modeline names none on
+    /// disk, in place of the definition's `schema_search_paths`.
+    pub schema_search_paths: Option<&'o [String]>,
 }
 
 /// A unit's document, folded, expanded and resolved.
@@ -49,6 +60,7 @@ pub struct Resolution {
     regions: BTreeMap<String, PathSet>,
     child_value_patterns: Vec<Regex>,
     schemas: SchemaCache,
+    schema_url_copies: Option<SchemaUrlCopies>,
     /// Common layers, parsed once however many units fold over them.
     common_layers: Mutex<BTreeMap<PathBuf, Result<Arc<Node>, Diagnostic>>>,
 }
@@ -83,6 +95,7 @@ impl Resolution {
             regions,
             child_value_patterns,
             schemas: SchemaCache::default(),
+            schema_url_copies: None,
             common_layers: Mutex::default(),
         })
     }
@@ -95,21 +108,23 @@ impl Resolution {
         &self.config_root
     }
 
+    pub fn set_schema_url_copies(&mut self, copies: SchemaUrlCopies) {
+        self.schema_url_copies = Some(copies);
+    }
+
     pub fn resolve(
         &self,
         unit: &Unit,
         source: &dyn FileSource,
-        builtins: Option<&dyn BuiltinValues>,
+        options: &ResolveOptions<'_>,
     ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
+        let builtins = options.builtins;
         let text = read(source, &unit.file).map_err(|diagnostic| vec![diagnostic])?;
-        let location = schema_location(
-            &self.definition,
-            &self.config_root,
-            &unit.file,
-            &text,
-            source,
-        )
-        .map_err(|diagnostic| vec![diagnostic])?;
+        let search_paths = options
+            .schema_search_paths
+            .unwrap_or(&self.definition.schema_search_paths);
+        let location = schema_location(search_paths, &self.config_root, &unit.file, &text, source)
+            .map_err(|diagnostic| vec![diagnostic])?;
         let overlay = self
             .parse(&unit.file, &text)
             .map_err(|diagnostic| vec![diagnostic])?;
@@ -131,7 +146,7 @@ impl Resolution {
         }
         let schema = self
             .schemas
-            .load(&location.path, source)
+            .load(&location.source, source, self.schema_url_copies.as_ref())
             .map_err(|message| vec![Diagnostic::at(&first_fold.position, message)])?;
 
         let key_expander = Expander::new(
@@ -703,7 +718,7 @@ references:
             overlay: common_layer.map(|_| "dev".to_owned()),
             common_layer: common_layer.map(|_| PathBuf::from("/root/mock-dsl.yml")),
         };
-        resolution.resolve(&unit, &source, None)
+        resolution.resolve(&unit, &source, &ResolveOptions::default())
     }
 
     #[test]

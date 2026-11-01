@@ -55,7 +55,14 @@ What the editor reads and the compiler does not yet:
 | `common_layer_discovery: overlay_includes` | the DSL is an error |
 | a `transform` macro | the call is an error |
 | a `merge` from a location | the content is left to the target, as a call |
-| a schema URL | the document is an error |
+
+### Schemas
+
+A document's schema is found as the editor finds it: the modeline first, then the definition's `schema_search_paths`. A caller may name other search paths for one resolution, in their place.
+
+- A path is relative to the document, or to the config folder when it starts with `{config_root}`, and is used when a file is on disk there.
+- A URL, `http://` or `https://`, is read with a copy kept of it, by the editor's rules for schema URLs: `yaml_dsl_max_age_days`, the check with `ETag` and `Last-Modified`, and the kept copy when the server does not answer.
+- The folder holding kept copies is the caller's to name. With none named, a schema URL is an error.
 
 ### Builtin values
 
@@ -163,6 +170,7 @@ Writing is deterministic: the same output tree gives the same bytes.
 
 - Every error carries the file, line and column of the value it is about.
 - A unit reports every error it finds, not only the first.
+- A schema error is placed at the value that breaks the rule, or at the key of a field the schema does not allow, and carries what is wrong there, the rule it breaks as its keyword and its JSON Pointer in the schema, and, where one allowed field or value is spelt closest, that name.
 - A unit with errors writes no files; the other units are unaffected.
 
 ## Rust API
@@ -173,6 +181,7 @@ One crate, `yaml-dsl-compiler`:
 |---|---|
 | `Compiler` | built from a DSL definition, the config root and a file source; lists units, resolves one, compiles one or all |
 | `BuiltinValues` | the caller's hook giving builtin names their values |
+| `ResolveOptions` | one resolution's builtin values and schema search paths |
 | `Translator` | the caller's code turning a resolved unit into output files |
 | `OutputFile` | a path relative to the unit's directory, its target language, an optional comment and its body |
 | `CompiledUnit` | a unit and either its written files or every error it holds |
@@ -203,5 +212,7 @@ Its integration tests run the binary over the example folder, compare the writte
 | `globset` | the definition's file patterns |
 | `serde`, `serde_json` | reading the definition and the schema |
 | `ignore` | the example tool's file source |
+| `ureq` | reading schema URLs |
+| `sha2` | naming the copies kept of schema URLs |
 
 Each is pinned to its latest release when it is added.

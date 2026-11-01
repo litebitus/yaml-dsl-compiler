@@ -16,15 +16,16 @@ mod reference_scan;
 mod resolve;
 pub mod resolved;
 mod schema;
+mod schema_url_copies;
 mod source;
 pub mod writer;
 pub mod yaml_reader;
 
 pub use compiler::{
-    BuiltinValues, CompiledUnit, Compiler, GeneratedFile, ResolvedUnit, Translator,
+    BuiltinValues, CompiledUnit, Compiler, GeneratedFile, ResolveOptions, ResolvedUnit, Translator,
 };
 pub use definition::DslDefinition;
-pub use diagnostic::Diagnostic;
+pub use diagnostic::{Diagnostic, DiagnosticNotes};
 pub use discover::Unit;
 pub use function_table::{CallKey, parse_call_key};
 pub use node::{Entry, Node, NodeKind};

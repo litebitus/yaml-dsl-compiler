@@ -107,7 +107,7 @@ fn an_error_names_its_place_and_its_unit_writes_nothing() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     let expected_place = format!(
-        "{}:3:5: `queue.name mock-orders.visibility`",
+        "{}:3:17: `visibility` is not an integer",
         overlay.canonicalize().unwrap().display()
     );
     assert!(stderr.contains(&expected_place), "{stderr}");
