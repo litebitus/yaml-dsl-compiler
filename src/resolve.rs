@@ -15,10 +15,10 @@ use crate::fold::deep_merge;
 use crate::json_path::{PathSet, PathStep};
 use crate::macros::Expander;
 use crate::node::{Entry, Node, NodeKind};
+use crate::position::Position;
 use crate::reference_scan::{NameReading, Reading, Resolver, Scanner, Strictness};
 use crate::resolved::{Declared, MapEntry, Reference, Target, TemplatePart, Value, ValueKind};
-use crate::schema::{SchemaCache, child_value, schema_location};
-use crate::schema_url_copies::SchemaUrlCopies;
+use crate::schema::{SchemaCache, SchemaProvider, child_value};
 use crate::source::FileSource;
 use crate::yaml_reader::parse;
 
@@ -35,9 +35,8 @@ pub trait BuiltinValues: Send + Sync {
 pub struct ResolveOptions<'o> {
     /// The values of the unit's builtin names.
     pub builtins: Option<&'o dyn BuiltinValues>,
-    /// Where the schema is looked for when the document's modeline names none on
-    /// disk, in place of the definition's `schema_search_paths`.
-    pub schema_search_paths: Option<&'o [String]>,
+    /// The caller's code that finds the unit's schema.
+    pub schema_provider: Option<&'o dyn SchemaProvider>,
 }
 
 /// A unit's document, folded, expanded and resolved.
@@ -49,6 +48,9 @@ pub struct ResolvedUnit {
     pub declarations: Vec<Declared>,
     /// Whether the unit's document is a fragment, which is never compiled alone.
     pub fragment: bool,
+    /// What resolving warns of without failing, such as what finding its schema
+    /// warned of.
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// What resolving needs that does not change from unit to unit.
@@ -60,7 +62,6 @@ pub struct Resolution {
     regions: BTreeMap<String, PathSet>,
     child_value_patterns: Vec<Regex>,
     schemas: SchemaCache,
-    schema_url_copies: Option<SchemaUrlCopies>,
     /// Common layers, parsed once however many units fold over them.
     common_layers: Mutex<BTreeMap<PathBuf, Result<Arc<Node>, Diagnostic>>>,
 }
@@ -95,7 +96,6 @@ impl Resolution {
             regions,
             child_value_patterns,
             schemas: SchemaCache::default(),
-            schema_url_copies: None,
             common_layers: Mutex::default(),
         })
     }
@@ -108,10 +108,6 @@ impl Resolution {
         &self.config_root
     }
 
-    pub fn set_schema_url_copies(&mut self, copies: SchemaUrlCopies) {
-        self.schema_url_copies = Some(copies);
-    }
-
     pub fn resolve(
         &self,
         unit: &Unit,
@@ -120,10 +116,16 @@ impl Resolution {
     ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
         let builtins = options.builtins;
         let text = read(source, &unit.file).map_err(|diagnostic| vec![diagnostic])?;
-        let search_paths = options
-            .schema_search_paths
-            .unwrap_or(&self.definition.schema_search_paths);
-        let location = schema_location(search_paths, &self.config_root, &unit.file, &text, source)
+        let file: Arc<str> = Arc::from(unit.file.to_string_lossy().as_ref());
+        let document_start = Position::file_start(&file);
+        let provider = options.schema_provider.ok_or_else(|| {
+            vec![Diagnostic::at(
+                &document_start,
+                "the caller gives no schema provider to find this document's schema",
+            )]
+        })?;
+        let document_schema = provider
+            .schema_of(unit, &text)
             .map_err(|diagnostic| vec![diagnostic])?;
         let overlay = self
             .parse(&unit.file, &text)
@@ -136,18 +138,19 @@ impl Resolution {
             None => None,
         };
         let first_fold = value_of(&fold_layers(common.as_ref(), &overlay));
-        if location.fragment.is_some() {
+        if document_schema.fragment.is_some() {
             return Ok(ResolvedUnit {
                 unit: unit.clone(),
                 document: first_fold,
                 declarations: Vec::new(),
                 fragment: true,
+                warnings: Vec::new(),
             });
         }
         let schema = self
             .schemas
-            .load(&location.source, source, self.schema_url_copies.as_ref())
-            .map_err(|message| vec![Diagnostic::at(&first_fold.position, message)])?;
+            .load(&document_schema.name, &document_schema.text)
+            .map_err(|message| vec![Diagnostic::at(&document_start, message)])?;
 
         let key_expander = Expander::new(
             &self.definition,
@@ -200,11 +203,17 @@ impl Resolution {
             ..declared
         })
         .collect();
+        let warnings = document_schema
+            .warnings
+            .iter()
+            .map(|warning| Diagnostic::at(&document_start, warning.clone()))
+            .collect();
         Ok(ResolvedUnit {
             unit: unit.clone(),
             document: resolved,
             declarations,
             fragment: false,
+            warnings,
         })
     }
 
@@ -614,6 +623,7 @@ mod tests {
 
     use super::*;
     use crate::resolved::Call;
+    use crate::schema::DocumentSchema;
     use crate::source::MemorySource;
 
     const SCHEMA: &str = r#"{
@@ -635,7 +645,6 @@ mod tests {
     const DEFINITION: &str = r#"
 id: mock
 file_includes: ["**/mock-dsl.yml"]
-schema_search_paths: ["{config_root}/mock.schema.json"]
 placeholder:
   pattern: "\\$\\{(?<body>[^}\\n]*)\\}"
   escape_prefix: "$"
@@ -704,9 +713,7 @@ references:
         common_layer: Option<&str>,
         document: &str,
     ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
-        let mut source = MemorySource::new()
-            .with_file("/root/mock.schema.json", SCHEMA)
-            .with_file("/root/dev/mock-dsl.yml", document);
+        let mut source = MemorySource::new().with_file("/root/dev/mock-dsl.yml", document);
         if let Some(common_layer) = common_layer {
             source = source.with_file("/root/mock-dsl.yml", common_layer);
         }
@@ -718,7 +725,25 @@ references:
             overlay: common_layer.map(|_| "dev".to_owned()),
             common_layer: common_layer.map(|_| PathBuf::from("/root/mock-dsl.yml")),
         };
-        resolution.resolve(&unit, &source, &ResolveOptions::default())
+        let options = ResolveOptions {
+            builtins: None,
+            schema_provider: Some(&MockSchema),
+        };
+        resolution.resolve(&unit, &source, &options)
+    }
+
+    /// The test schema, for every unit.
+    struct MockSchema;
+
+    impl SchemaProvider for MockSchema {
+        fn schema_of(&self, _unit: &Unit, _text: &str) -> Result<DocumentSchema, Diagnostic> {
+            Ok(DocumentSchema {
+                name: "mock.schema.json".to_owned(),
+                text: SCHEMA.to_owned(),
+                fragment: None,
+                warnings: Vec::new(),
+            })
+        }
     }
 
     #[test]

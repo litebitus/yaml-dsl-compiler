@@ -11,7 +11,7 @@ use crate::discover::{Unit, selects, unit_of, units};
 use crate::output::OutputFile;
 use crate::resolve::Resolution;
 pub use crate::resolve::{BuiltinValues, ResolveOptions, ResolvedUnit};
-use crate::schema_url_copies::SchemaUrlCopies;
+use crate::schema::SchemaProvider;
 use crate::source::FileSource;
 use crate::writer::write_file;
 
@@ -38,6 +38,7 @@ pub struct Compiler {
     resolution: Resolution,
     source: Arc<dyn FileSource>,
     builtins: Option<Arc<dyn BuiltinValues>>,
+    schema_provider: Option<Arc<dyn SchemaProvider>>,
 }
 
 impl Compiler {
@@ -51,6 +52,7 @@ impl Compiler {
             resolution: Resolution::new(definition, config_root.into())?,
             source,
             builtins: None,
+            schema_provider: None,
         })
     }
 
@@ -90,26 +92,31 @@ impl Compiler {
     pub fn resolve(&self, unit: &Unit) -> Result<ResolvedUnit, Vec<Diagnostic>> {
         let options = ResolveOptions {
             builtins: self.builtins.as_deref(),
-            schema_search_paths: None,
+            schema_provider: self.schema_provider.as_deref(),
         };
         self.resolution
             .resolve(unit, self.source.as_ref(), &options)
     }
 
     /// Resolves `unit` with `options`, for a caller whose builtin values or schema
-    /// differ from one resolution of a document to the next.
+    /// provider differ from one resolution of a document to the next. An option the
+    /// caller leaves out is the compiler's own.
     pub fn resolve_with(
         &self,
         unit: &Unit,
         options: &ResolveOptions<'_>,
     ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
-        self.resolution.resolve(unit, self.source.as_ref(), options)
+        let options = ResolveOptions {
+            builtins: options.builtins.or(self.builtins.as_deref()),
+            schema_provider: options.schema_provider.or(self.schema_provider.as_deref()),
+        };
+        self.resolution
+            .resolve(unit, self.source.as_ref(), &options)
     }
 
-    /// Schema URLs are downloaded, and a copy of each is kept in `directory`.
-    pub fn with_schema_url_copies(mut self, directory: impl Into<PathBuf>) -> Self {
-        self.resolution
-            .set_schema_url_copies(SchemaUrlCopies::new(directory));
+    /// The caller's code that finds each unit's schema.
+    pub fn with_schema_provider(mut self, provider: Arc<dyn SchemaProvider>) -> Self {
+        self.schema_provider = Some(provider);
         self
     }
 

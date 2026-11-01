@@ -8,18 +8,20 @@ A Rust library that compiles YAML DSLs into code. A DSL is defined by configurat
 - Placeholders, locals and loop variables, resolved by the DSL's scopes.
 - Declarations and references, checked and kept as references for the target.
 - Macros expanded: `merge`, `loop` and `function_call`; other functions stay calls.
-- Validation against the schema the document declares, with errors at file, line and column.
+- Validation against the schema the caller hands over, with errors placed at what is wrong, the rule broken and the closest allowed name.
+- Pure code: the library finds, fetches and reads no schema and runs no program.
 - Writers for HCL, JSON and YAML, each in one readable style; HCL is left unchanged by `terraform fmt`.
 - Units compile in parallel.
 
 ## Usage
 
-A caller supplies three things and builds its own binary:
+A caller supplies four things and builds its own binary:
 
 | Supplies | How |
 |---|---|
 | the DSL definition | a DSL block of a `yaml-dsl.yml`, read by `DslDefinition::from_json` |
 | a file source | the `FileSource` trait: list and read files |
+| a schema provider | the `SchemaProvider` trait: each unit's schema, found the way the caller's DSL calls for |
 | a translator | the `Translator` trait: a resolved unit in, output files out |
 
 ## Example

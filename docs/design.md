@@ -34,6 +34,7 @@ Keys are merged as they resolve: a placeholder in a key that reads a builtin the
 |---|---|
 | DSL definition | a typed value with the shape of a DSL block of the editor's config |
 | File source | how the library lists and reads files |
+| Schema provider | the caller's code that finds each unit's schema |
 | Translator | the caller's code for one DSL and one target |
 
 ### DSL definition
@@ -44,7 +45,7 @@ The library reads the definition's fields with the meaning the editor's design d
 - its placeholders, scopes, declarations and references;
 - its locals and loop variables;
 - its functions and macros, through the function table the document's schema publishes at `#/x-yaml-dsl-functions`;
-- the schema it falls back to.
+- the schema search paths, kept for the caller, whose schema provider finds the schema.
 
 Fields that only shape editing, such as key sort orders, are not read. The library never loads a config file: where the definition comes from is the caller's.
 
@@ -58,11 +59,10 @@ What the editor reads and the compiler does not yet:
 
 ### Schemas
 
-A document's schema is found as the editor finds it: the modeline first, then the definition's `schema_search_paths`. A caller may name other search paths for one resolution, in their place.
+The library is pure code: it finds, fetches and reads no schema itself. The caller's schema provider hands it each unit's schema: its text, the name reports give it, the fragment of the schema a fragment document's root is, and what finding it warns of. A program finds a schema the way its DSL calls for, such as the editor's rules of a modeline and then `schema_search_paths`; the library keeps the definition's `schema_search_paths` for it to read.
 
-- A path is relative to the document, or to the config folder when it starts with `{config_root}`, and is used when a file is on disk there.
-- A URL, `http://` or `https://`, is read with a copy kept of it, by the editor's rules for schema URLs: `yaml_dsl_max_age_days`, the check with `ETag` and `Last-Modified`, and the kept copy when the server does not answer.
-- The folder holding kept copies is the caller's to name. With none named, a schema URL is an error.
+- Each schema is parsed and compiled once per run, by its name and text, however many units read it.
+- What finding a schema warns of comes back with the resolved unit, as warnings that fail nothing.
 
 ### Builtin values
 
@@ -70,7 +70,7 @@ A logical scope's builtin names are the caller's to give values, through a hook 
 
 ### Fragments
 
-A document whose modeline names a fragment is never compiled alone: its unit compiles to no files.
+A document the schema provider names a fragment, as the editor reads a modeline's fragment, is never compiled alone: its unit compiles to no files.
 
 ### File source
 
@@ -181,7 +181,8 @@ One crate, `yaml-dsl-compiler`:
 |---|---|
 | `Compiler` | built from a DSL definition, the config root and a file source; lists units, resolves one, compiles one or all |
 | `BuiltinValues` | the caller's hook giving builtin names their values |
-| `ResolveOptions` | one resolution's builtin values and schema search paths |
+| `ResolveOptions` | one resolution's builtin values and schema provider, each in place of the compiler's own |
+| `SchemaProvider`, `DocumentSchema` | the caller's code that finds a unit's schema, and what it hands over |
 | `Translator` | the caller's code turning a resolved unit into output files |
 | `OutputFile` | a path relative to the unit's directory, its target language, an optional comment and its body |
 | `CompiledUnit` | a unit and either its written files or every error it holds |
@@ -212,7 +213,5 @@ Its integration tests run the binary over the example folder, compare the writte
 | `globset` | the definition's file patterns |
 | `serde`, `serde_json` | reading the definition and the schema |
 | `ignore` | the example tool's file source |
-| `ureq` | reading schema URLs |
-| `sha2` | naming the copies kept of schema URLs |
 
 Each is pinned to its latest release when it is added.

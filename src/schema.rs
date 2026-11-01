@@ -1,8 +1,9 @@
-//! Finds a document's schema, reads its function table, and validates the
-//! resolved document against it.
+//! A document's schema, as its caller hands it over: its function table, and
+//! the validation of the resolved document against it.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use fancy_regex::Regex;
@@ -11,164 +12,63 @@ use jsonschema::{JsonType, ValidationError};
 use serde_json::{Map, Value as JsonValue};
 
 use crate::diagnostic::Diagnostic;
+use crate::discover::Unit;
 use crate::function_table::FunctionTable;
 use crate::node::number_json;
 use crate::position::Position;
 use crate::resolved::{Value, ValueKind};
-use crate::schema_url_copies::{SchemaUrlCopies, is_schema_url};
-use crate::source::FileSource;
 
-const MODELINE_MARKER: &str = "yaml-language-server: $schema=";
-const CONFIG_ROOT: &str = "{config_root}";
-
-/// Where a document's schema is, and whether the document is a fragment of it.
+/// A document's schema, as its caller found it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SchemaLocation {
-    pub source: SchemaSource,
-    /// The modeline's fragment: a document that has one is a fragment, never a full document.
+pub struct DocumentSchema {
+    /// The schema as reports name it, such as its file's name or its URL.
+    pub name: String,
+    pub text: String,
+    /// Where in the schema the document's root is, for a fragment, which is never
+    /// compiled alone; `None` for a full document.
     pub fragment: Option<String>,
+    /// What finding the schema warns of, such as a credential its server refused.
+    pub warnings: Vec<String>,
 }
 
-/// A schema's place: a file on disk, or a URL read with the copies kept of it.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SchemaSource {
-    File(PathBuf),
-    Url(String),
+/// The caller's code that finds a unit's schema: the compiler looks for none and
+/// reads none itself.
+pub trait SchemaProvider: Send + Sync {
+    fn schema_of(&self, unit: &Unit, document_text: &str) -> Result<DocumentSchema, Diagnostic>;
 }
 
 pub struct LoadedSchema {
     pub table: FunctionTable,
     validator: jsonschema::Validator,
     schema: JsonValue,
-    /// The schema as a report names it: its file's name, or its URL.
+    /// The schema as a report names it, such as its file's name or its URL.
     name: String,
 }
 
-/// A schema loaded once, by the first unit that reads it, or why it did not load.
+/// A schema parsed once, by the first unit that reads it, or why it did not parse.
 type SchemaLoad = Arc<OnceLock<Result<Arc<LoadedSchema>, String>>>;
 
-/// Schemas loaded once and shared by every unit that reads them.
+/// Schemas parsed once and shared by every unit that reads them, by name and text.
 #[derive(Default)]
 pub struct SchemaCache {
-    loaded: Mutex<BTreeMap<SchemaSource, SchemaLoad>>,
+    loaded: Mutex<BTreeMap<(String, u64), SchemaLoad>>,
 }
 
 impl SchemaCache {
-    pub fn load(
-        &self,
-        schema: &SchemaSource,
-        source: &dyn FileSource,
-        url_copies: Option<&SchemaUrlCopies>,
-    ) -> Result<Arc<LoadedSchema>, String> {
+    pub fn load(&self, name: &str, text: &str) -> Result<Arc<LoadedSchema>, String> {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let key = (name.to_owned(), hasher.finish());
         let cell = {
             let mut loaded = self
                 .loaded
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            Arc::clone(loaded.entry(schema.clone()).or_default())
+            Arc::clone(loaded.entry(key).or_default())
         };
-        cell.get_or_init(|| {
-            let text = match schema {
-                SchemaSource::File(path) => source
-                    .read(path)
-                    .map_err(|error| format!("reading schema {}: {error}", path.display()))?,
-                SchemaSource::Url(url) => url_copies
-                    .ok_or_else(|| {
-                        format!("schema URL `{url}`: the caller names no folder for kept copies")
-                    })?
-                    .read(url)?,
-            };
-            LoadedSchema::parse(&schema.report_name(), &text).map(Arc::new)
-        })
-        .clone()
+        cell.get_or_init(|| LoadedSchema::parse(name, text).map(Arc::new))
+            .clone()
     }
-}
-
-impl SchemaSource {
-    /// The schema as a report names it: its file's name, or its URL.
-    fn report_name(&self) -> String {
-        match self {
-            SchemaSource::File(path) => path.file_name().map_or_else(
-                || path.display().to_string(),
-                |name| name.to_string_lossy().into_owned(),
-            ),
-            SchemaSource::Url(url) => url.clone(),
-        }
-    }
-}
-
-impl std::fmt::Display for SchemaSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SchemaSource::File(path) => write!(formatter, "{}", path.display()),
-            SchemaSource::Url(url) => write!(formatter, "{url}"),
-        }
-    }
-}
-
-/// The schema of the document at `document_path`: its modeline first, then the
-/// search paths. A URL is taken as written; a path, where a file is on disk.
-pub fn schema_location(
-    search_paths: &[String],
-    config_root: &Path,
-    document_path: &Path,
-    document_text: &str,
-    source: &dyn FileSource,
-) -> Result<SchemaLocation, Diagnostic> {
-    let file: Arc<str> = Arc::from(document_path.to_string_lossy().as_ref());
-    let directory = document_path.parent().unwrap_or(config_root);
-    let modeline = document_text
-        .lines()
-        .enumerate()
-        .find_map(|(index, line)| modeline_uri(line).map(|uri| (index + 1, uri)));
-    if let Some((_, uri)) = &modeline {
-        let (path, fragment) = match uri.split_once('#') {
-            Some((path, fragment)) => (path, Some(fragment.to_owned())),
-            None => (uri.as_str(), None),
-        };
-        if is_schema_url(path) {
-            return Ok(SchemaLocation {
-                source: SchemaSource::Url(path.to_owned()),
-                fragment,
-            });
-        }
-        let path = directory.join(path.split('?').next().unwrap_or(path));
-        if source.exists(&path) {
-            return Ok(SchemaLocation {
-                source: SchemaSource::File(path),
-                fragment,
-            });
-        }
-    }
-    for entry in search_paths {
-        if is_schema_url(entry) {
-            return Ok(SchemaLocation {
-                source: SchemaSource::Url(entry.clone()),
-                fragment: None,
-            });
-        }
-        let path = match entry.strip_prefix(CONFIG_ROOT) {
-            Some(rest) => config_root.join(rest.trim_start_matches('/')),
-            None => directory.join(entry),
-        };
-        if source.exists(&path) {
-            return Ok(SchemaLocation {
-                source: SchemaSource::File(path),
-                fragment: None,
-            });
-        }
-    }
-    let line = modeline.map_or(1, |(line, _)| line);
-    Err(Diagnostic::at(
-        &Position::new(&file, line, 1),
-        "no schema found: neither the modeline nor schema_search_paths names a file on disk",
-    ))
-}
-
-fn modeline_uri(line: &str) -> Option<String> {
-    let comment = line.trim_start().strip_prefix('#')?;
-    let uri = comment.trim_start().strip_prefix(MODELINE_MARKER)?;
-    Some(uri.trim().to_owned())
 }
 
 impl LoadedSchema {
@@ -562,9 +462,7 @@ fn display_pointer(pointer: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::definition::DslDefinition;
     use crate::resolved::{Call, MapEntry};
-    use crate::source::MemorySource;
 
     fn position() -> Position {
         Position::file_start(&Arc::from("mock.yml"))
@@ -738,57 +636,5 @@ mod tests {
         let diagnostics = schema.validate(&document, &[]);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert!(diagnostics[0].message.starts_with("`count`"));
-    }
-
-    #[test]
-    fn the_modeline_wins_over_the_search_paths() {
-        let block = serde_json::json!({
-            "id": "mock",
-            "file_includes": ["**/mock-dsl.yml"],
-            "schema_search_paths": ["{config_root}/search.json"]
-        });
-        let definition = DslDefinition::from_json(&block).unwrap();
-        let source = MemorySource::new()
-            .with_file("/root/a/local.json", "{}")
-            .with_file("/root/search.json", "{}");
-        let text = "# yaml-language-server: $schema=local.json#/properties/queue\nqueue: {}\n";
-        let location = schema_location(
-            &definition.schema_search_paths,
-            Path::new("/root"),
-            Path::new("/root/a/mock-dsl.yml"),
-            text,
-            &source,
-        )
-        .unwrap();
-        assert_eq!(
-            location,
-            SchemaLocation {
-                source: SchemaSource::File(PathBuf::from("/root/a/local.json")),
-                fragment: Some("/properties/queue".into())
-            }
-        );
-        let location = schema_location(
-            &definition.schema_search_paths,
-            Path::new("/root"),
-            Path::new("/root/a/mock-dsl.yml"),
-            "queue: {}\n",
-            &source,
-        )
-        .unwrap();
-        assert_eq!(
-            location.source,
-            SchemaSource::File(PathBuf::from("/root/search.json"))
-        );
-        let url = "https://mock.example/mock.schema.json?yaml_dsl_max_age_days=1";
-        let location = schema_location(
-            &[url.to_owned()],
-            Path::new("/root"),
-            Path::new("/root/a/mock-dsl.yml"),
-            &format!("# yaml-language-server: $schema={url}#\nqueue: {{}}\n"),
-            &source,
-        )
-        .unwrap();
-        assert_eq!(location.source, SchemaSource::Url(url.to_owned()));
-        assert_eq!(location.fragment.as_deref(), Some(""));
     }
 }

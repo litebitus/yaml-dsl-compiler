@@ -1,6 +1,7 @@
 //! Compiles every DSL of a `yaml-dsl.yml` that the tool's own config gives a
 //! translator.
 
+mod schema_files;
 mod translator;
 mod working_tree;
 
@@ -14,6 +15,7 @@ use serde_json::Value as JsonValue;
 use yaml_dsl_compiler::resolved::ValueKind;
 use yaml_dsl_compiler::{BuiltinValues, Compiler, DslDefinition, Unit};
 
+use crate::schema_files::SchemaFiles;
 use crate::translator::MockTranslator;
 use crate::working_tree::WorkingTree;
 
@@ -88,9 +90,14 @@ fn run(config_root: &Path) -> Result<bool, String> {
         let definition = definitions.remove(&id).ok_or_else(|| {
             format!("{TOOL_CONFIG_FILE_NAME}: `{id}` is no DSL of {DSL_CONFIG_FILE_NAME}")
         })?;
+        let schemas = SchemaFiles {
+            config_root: config_root.clone(),
+            search_paths: definition.schema_search_paths.clone(),
+        };
         let compiler = Compiler::new(definition, config_root.clone(), source.clone())
             .map_err(|error| error.to_string())?
-            .with_builtin_values(Arc::new(OverlayEnvironment));
+            .with_builtin_values(Arc::new(OverlayEnvironment))
+            .with_schema_provider(Arc::new(schemas));
         let translator = MockTranslator::new(settings, config_root.clone());
         for compiled in compiler
             .compile_all(&translator)
