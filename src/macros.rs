@@ -4,15 +4,16 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use crate::definition::{DslDefinition, MarkerFunction};
-use crate::diagnostic::Diagnostic;
-use crate::function_table::{
+use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::Position;
+use yaml_dsl_spec::definition::{DslDefinition, MarkerFunction};
+use yaml_dsl_spec::function_table::{
     CallKey, FunctionEntry, FunctionTable, MacroEntry, MacroKind, MergeBehavior, parse_call_key,
 };
-use crate::json_path::{PathSet, PathStep};
-use crate::position::Position;
+use yaml_dsl_spec::json_path::{PathSet, PathStep};
+use yaml_dsl_spec::resolved::{Call, MapEntry, Reference, Target, Value, ValueKind};
+
 use crate::reference_scan::{NameReading, Reading, Scanner, Strictness};
-use crate::resolved::{Call, MapEntry, Reference, Target, Value, ValueKind};
 
 type Bindings = Vec<(String, Value)>;
 

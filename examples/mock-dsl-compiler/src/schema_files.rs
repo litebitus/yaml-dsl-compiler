@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use yaml_dsl_compiler::{Diagnostic, DocumentSchema, Position, SchemaProvider, Unit};
+use yaml_dsl_compiler::{DocumentSchema, SchemaProvider, Unit};
+use yaml_dsl_spec::{Diagnostic, Position};
 
 const MODELINE_MARKER: &str = "yaml-language-server: $schema=";
 const CONFIG_ROOT: &str = "{config_root}/";

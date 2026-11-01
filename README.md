@@ -19,7 +19,7 @@ A caller supplies four things and builds its own binary:
 
 | Supplies | How |
 |---|---|
-| the DSL definition | a DSL block of a `yaml-dsl.yml`, read by `DslDefinition::from_json` |
+| the DSL definition | a DSL block of a `yaml-dsl.yml`, read and validated by [yaml-dsl-spec](https://github.com/litebitus/yaml-dsl-spec)'s `read_dsl_definitions` |
 | a file source | the `FileSource` trait: list and read files |
 | a schema provider | the `SchemaProvider` trait: each unit's schema, found the way the caller's DSL calls for |
 | a translator | the `Translator` trait: a resolved unit in, output files out |

@@ -1,12 +1,11 @@
 //! Reads placeholders and references in scalars by the definition's rules.
 
 use fancy_regex::Regex;
-
-use crate::definition::{DslDefinition, ReferencePosition, ReferenceRule};
-use crate::diagnostic::Diagnostic;
-use crate::json_path::{PathSet, PathStep};
-use crate::position::Position;
-use crate::resolved::{Reference, TemplatePart, Value, ValueKind};
+use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::Position;
+use yaml_dsl_spec::definition::{DslDefinition, ReferencePosition, ReferenceRule};
+use yaml_dsl_spec::json_path::{PathSet, PathStep};
+use yaml_dsl_spec::resolved::{Reference, TemplatePart, Value, ValueKind};
 
 struct CompiledRule {
     rule: ReferenceRule,

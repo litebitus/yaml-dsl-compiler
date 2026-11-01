@@ -8,7 +8,7 @@
   - Reads a placeholder after `placeholder.escape_prefix` as text.
   - Takes each unit's schema from the caller's schema provider; it finds, fetches and reads none itself.
   - Places a schema error at what is wrong, with the rule it breaks and the closest allowed name.
-  - Gives callers `closest_name`, the name it suggests in its own errors.
+  - Takes the DSL definition, YAML reading, diagnostics, the function table and schema validation from [yaml-dsl-spec](https://github.com/litebitus/yaml-dsl-spec).
 - Writers
   - HCL, JSON and YAML, each in one style.
   - HCL writes conditionals, `for` expressions, operations, splats, expression keys and template directives.

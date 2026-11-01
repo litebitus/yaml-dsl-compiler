@@ -32,7 +32,7 @@ Keys are merged as they resolve: a placeholder in a key that reads a builtin the
 
 | Input | Holds |
 |---|---|
-| DSL definition | a typed value with the shape of a DSL block of the editor's config |
+| DSL definition | a DSL block of a `yaml-dsl.yml`, read and validated by [yaml-dsl-spec](https://github.com/litebitus/yaml-dsl-spec)'s `read_dsl_definitions` |
 | File source | how the library lists and reads files |
 | Schema provider | the caller's code that finds each unit's schema |
 | Translator | the caller's code for one DSL and one target |
@@ -47,7 +47,7 @@ The library reads the definition's fields with the meaning the editor's design d
 - its functions and macros, through the function table the document's schema publishes at `#/x-yaml-dsl-functions`;
 - the schema search paths, kept for the caller, whose schema provider finds the schema.
 
-Fields that only shape editing, such as key sort orders, are not read. The library never loads a config file: where the definition comes from is the caller's.
+Fields that only shape editing, such as key sort orders, are not read. The library never loads a config file: the caller reads it with [yaml-dsl-spec](https://github.com/litebitus/yaml-dsl-spec), which returns each DSL's definition validated, or every problem at its field.
 
 What the editor reads and the compiler does not yet:
 
@@ -175,7 +175,7 @@ Writing is deterministic: the same output tree gives the same bytes.
 
 ## Rust API
 
-One crate, `yaml-dsl-compiler`:
+The crate `yaml-dsl-compiler`, beside [yaml-dsl-spec](https://github.com/litebitus/yaml-dsl-spec), which holds the DSL definition's types and reader, the YAML reader with positions, `Diagnostic`, `json_path`, the resolved document's types, the function table, the schema validation and `closest_name`:
 
 | Item | Is |
 |---|---|
@@ -187,8 +187,6 @@ One crate, `yaml-dsl-compiler`:
 | `OutputFile` | a path relative to the unit's directory, its target language, an optional comment and its body |
 | `CompiledUnit` | a unit and either its written files or every error it holds |
 | `ResolvedUnit` | a unit's resolved document and the names it declares |
-| `json_path` | the definition's JSONPath subset, selecting nodes of a resolved document in document order |
-| `closest_name` | the candidate spelt closest to a name, where one is close enough to be a likely fix, for a caller's own errors to offer as their help |
 
 The library renders files and returns them; writing them to disk is the caller's.
 

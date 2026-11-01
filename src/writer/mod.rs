@@ -4,7 +4,8 @@ mod hcl;
 mod json;
 mod yaml;
 
-use crate::diagnostic::Diagnostic;
+use yaml_dsl_spec::Diagnostic;
+
 use crate::output::{ObjectKey, OutputFile};
 
 /// The longest line a writer writes where the language lets it break the line.

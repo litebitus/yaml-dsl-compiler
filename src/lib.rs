@@ -1,34 +1,24 @@
-//! Compiles YAML DSLs defined by configuration into code.
+//! Compiles YAML DSLs defined by configuration into code. Reading a DSL's
+//! definition, its documents' YAML and their validation are `yaml-dsl-spec`'s;
+//! this crate folds, expands and resolves a DSL's documents, and writes what a
+//! translator turns them into.
 
 mod compiler;
 mod declarations;
-pub mod definition;
-mod diagnostic;
 mod discover;
 mod fold;
-mod function_table;
-pub mod json_path;
 mod macros;
-mod node;
 pub mod output;
-mod position;
 mod reference_scan;
 mod resolve;
-pub mod resolved;
-mod schema;
+mod schema_provider;
 mod source;
 pub mod writer;
-pub mod yaml_reader;
 
 pub use compiler::{
     BuiltinValues, CompiledUnit, Compiler, GeneratedFile, ResolveOptions, ResolvedUnit, Translator,
 };
-pub use definition::DslDefinition;
-pub use diagnostic::{Diagnostic, DiagnosticNotes};
 pub use discover::Unit;
-pub use function_table::{CallKey, parse_call_key};
-pub use node::{Entry, Node, NodeKind};
-pub use position::Position;
-pub use schema::{DocumentSchema, SchemaProvider, closest_name};
+pub use schema_provider::{DocumentSchema, SchemaProvider};
 pub use source::{FileSource, MemorySource};
 pub use writer::TargetLanguage;

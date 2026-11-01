@@ -1,6 +1,6 @@
 //! Folds a common layer under its overlay.
 
-use crate::node::{Entry, Node, NodeKind};
+use yaml_dsl_spec::{Entry, Node, NodeKind};
 
 /// Merges `overlay` over `base`: maps merge key by key, the overlay winning; a null
 /// deletes the key; an empty map or list at a key the base holds opts out of it,
@@ -40,8 +40,9 @@ pub fn deep_merge(base: &Node, overlay: &Node) -> Node {
 mod tests {
     use std::sync::Arc;
 
+    use yaml_dsl_spec::yaml_reader::parse;
+
     use super::*;
-    use crate::yaml_reader::parse;
 
     fn node(text: &str) -> Node {
         parse(&Arc::from("mock.yml"), text, &[]).unwrap()

@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
+use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::definition::{CommonLayerDiscovery, DslDefinition, Layers};
 
-use crate::definition::{CommonLayerDiscovery, DslDefinition, Layers};
-use crate::diagnostic::Diagnostic;
 use crate::source::FileSource;
 
 const CONFIG_ROOT: &str = "{config_root}/";

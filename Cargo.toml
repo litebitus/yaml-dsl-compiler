@@ -15,8 +15,6 @@ members = ["examples/mock-dsl-compiler"]
 [dependencies]
 fancy-regex = "0.20.0"
 globset = "0.4.21"
-jsonschema = { version = "0.60.2", default-features = false }
 rayon = "1.12.0"
-saphyr-parser = "0.3.3"
-serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+yaml-dsl-spec = "0.0.1"

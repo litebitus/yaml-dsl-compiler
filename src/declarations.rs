@@ -2,11 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::definition::{DeclarationRule, KeyToken, NameSource, NameSpelling, Scope};
-use crate::diagnostic::Diagnostic;
-use crate::json_path::{PathPattern, PathStep};
-use crate::position::Position;
-use crate::resolved::{Declared, Value, ValueKind};
+use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::Position;
+use yaml_dsl_spec::definition::{DeclarationRule, KeyToken, NameSource, NameSpelling, Scope};
+use yaml_dsl_spec::json_path::{PathPattern, PathStep};
+use yaml_dsl_spec::resolved::{Declared, Value, ValueKind};
 
 #[derive(Clone, Debug)]
 pub struct Declaration {

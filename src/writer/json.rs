@@ -1,8 +1,8 @@
 //! JSON, two-space indented in tree order.
 
 use serde_json::{Map, Value as JsonValue};
+use yaml_dsl_spec::number_json;
 
-use crate::node::number_json;
 use crate::output::{BodyItem, Expression, OutputFile};
 use crate::writer::key_name;
 

@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
-use yaml_dsl_compiler::resolved::ValueKind;
-use yaml_dsl_compiler::{BuiltinValues, Compiler, DslDefinition, Unit};
+use yaml_dsl_compiler::{BuiltinValues, Compiler, Unit};
+use yaml_dsl_spec::read_dsl_definitions;
+use yaml_dsl_spec::resolved::ValueKind;
 
 use crate::schema_files::SchemaFiles;
 use crate::translator::MockTranslator;
@@ -73,17 +74,20 @@ fn run(config_root: &Path) -> Result<bool, String> {
     let tool_config: ToolConfig =
         serde_json::from_value(read_yaml(&config_root.join(TOOL_CONFIG_FILE_NAME))?)
             .map_err(|error| format!("{TOOL_CONFIG_FILE_NAME}: {error}"))?;
-    let dsl_config = read_yaml(&config_root.join(DSL_CONFIG_FILE_NAME))?;
-    let blocks = dsl_config
-        .get("dsls")
-        .and_then(JsonValue::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut definitions = BTreeMap::new();
-    for block in &blocks {
-        let definition = DslDefinition::from_json(block)?;
-        definitions.insert(definition.id.clone(), definition);
-    }
+    let dsl_config_file = config_root.join(DSL_CONFIG_FILE_NAME);
+    let dsl_config = std::fs::read_to_string(&dsl_config_file)
+        .map_err(|error| format!("{}: {error}", dsl_config_file.display()))?;
+    let declared = read_dsl_definitions(&dsl_config_file, &dsl_config).map_err(|problems| {
+        problems
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let mut definitions: BTreeMap<_, _> = declared
+        .into_iter()
+        .map(|dsl| (dsl.definition.id.clone(), dsl.definition))
+        .collect();
     let source = Arc::new(WorkingTree);
     let mut all_compiled = true;
     for (id, settings) in tool_config.translators {
@@ -125,7 +129,7 @@ fn read_yaml(path: &Path) -> Result<JsonValue, String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let file: Arc<str> = Arc::from(path.to_string_lossy().as_ref());
-    yaml_dsl_compiler::yaml_reader::parse(&file, &text, &[])
+    yaml_dsl_spec::yaml_reader::parse(&file, &text, &[])
         .map(|node| node.to_json())
         .map_err(|error| error.to_string())
 }

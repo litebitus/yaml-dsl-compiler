@@ -6,21 +6,24 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use fancy_regex::Regex;
+use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::Position;
+use yaml_dsl_spec::definition::{DslDefinition, Scope};
+use yaml_dsl_spec::json_path::{PathSet, PathStep};
+use yaml_dsl_spec::resolved::{
+    Declared, MapEntry, Reference, Target, TemplatePart, Value, ValueKind,
+};
+use yaml_dsl_spec::schema::{SchemaCache, child_value};
+use yaml_dsl_spec::yaml_reader::parse;
+use yaml_dsl_spec::{Entry, Node, NodeKind};
 
 use crate::declarations::{CompiledDeclarationRule, Declaration, Declarations, compile_rules};
-use crate::definition::{DslDefinition, Scope};
-use crate::diagnostic::Diagnostic;
 use crate::discover::Unit;
 use crate::fold::deep_merge;
-use crate::json_path::{PathSet, PathStep};
 use crate::macros::Expander;
-use crate::node::{Entry, Node, NodeKind};
-use crate::position::Position;
 use crate::reference_scan::{NameReading, Reading, Resolver, Scanner, Strictness};
-use crate::resolved::{Declared, MapEntry, Reference, Target, TemplatePart, Value, ValueKind};
-use crate::schema::{SchemaCache, SchemaProvider, child_value};
+use crate::schema_provider::SchemaProvider;
 use crate::source::FileSource;
-use crate::yaml_reader::parse;
 
 /// The values of a logical scope's builtin names, which the caller knows and the
 /// document does not, such as the environment an overlay deploys to.
@@ -137,7 +140,7 @@ impl Resolution {
             ),
             None => None,
         };
-        let first_fold = value_of(&fold_layers(common.as_ref(), &overlay));
+        let first_fold = Value::from_node(&fold_layers(common.as_ref(), &overlay));
         if document_schema.fragment.is_some() {
             return Ok(ResolvedUnit {
                 unit: unit.clone(),
@@ -164,7 +167,7 @@ impl Resolution {
         let overlay = self.resolve_keys(&overlay, &mut Vec::new(), &mut resolve_key);
         let common =
             common.map(|common| self.resolve_keys(&common, &mut Vec::new(), &mut resolve_key));
-        let document = value_of(&fold_layers(common.as_ref(), &overlay));
+        let document = Value::from_node(&fold_layers(common.as_ref(), &overlay));
 
         let mut diagnostics = Vec::new();
         let raw_locals = self.raw_locals(&document);
@@ -390,27 +393,6 @@ fn read(source: &dyn FileSource, path: &Path) -> Result<String, Diagnostic> {
         .map_err(|error| Diagnostic::unplaced(format!("reading {}: {error}", path.display())))
 }
 
-fn value_of(node: &Node) -> Value {
-    let kind = match &node.kind {
-        NodeKind::Null => ValueKind::Null,
-        NodeKind::Bool(flag) => ValueKind::Bool(*flag),
-        NodeKind::Number(text) => ValueKind::Number(text.clone()),
-        NodeKind::String(text) => ValueKind::String(text.clone()),
-        NodeKind::List(items) => ValueKind::List(items.iter().map(value_of).collect()),
-        NodeKind::Map(entries) => ValueKind::Map(
-            entries
-                .iter()
-                .map(|entry| MapEntry {
-                    key: entry.key.clone(),
-                    key_position: entry.key_position.clone(),
-                    value: value_of(&entry.value),
-                })
-                .collect(),
-        ),
-    };
-    Value::new(kind, node.position.clone())
-}
-
 /// Resolves the names left after expansion: builtins and declarations. A name no
 /// rule resolves is an error.
 struct NameResolver<'r> {
@@ -621,9 +603,10 @@ fn in_later_item(declaration: &[PathStep], site: &[PathStep]) -> bool {
 mod tests {
     use std::path::PathBuf;
 
+    use yaml_dsl_spec::resolved::Call;
+
     use super::*;
-    use crate::resolved::Call;
-    use crate::schema::DocumentSchema;
+    use crate::schema_provider::DocumentSchema;
     use crate::source::MemorySource;
 
     const SCHEMA: &str = r#"{
@@ -825,7 +808,7 @@ references:
             ),
             ValueKind::List(items) => serde_json::Value::Array(items.iter().map(json).collect()),
             ValueKind::String(text) => serde_json::Value::String(text.clone()),
-            ValueKind::Number(text) => crate::node::number_json(text),
+            ValueKind::Number(text) => yaml_dsl_spec::number_json(text),
             ValueKind::Bool(flag) => serde_json::Value::Bool(*flag),
             other => serde_json::Value::String(format!("{other:?}")),
         }

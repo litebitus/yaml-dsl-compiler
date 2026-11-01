@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rayon::prelude::*;
+use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::definition::DslDefinition;
 
-use crate::definition::DslDefinition;
-use crate::diagnostic::Diagnostic;
 use crate::discover::{Unit, selects, unit_of, units};
 use crate::output::OutputFile;
 use crate::resolve::Resolution;
 pub use crate::resolve::{BuiltinValues, ResolveOptions, ResolvedUnit};
-use crate::schema::SchemaProvider;
+use crate::schema_provider::SchemaProvider;
 use crate::source::FileSource;
 use crate::writer::write_file;
 

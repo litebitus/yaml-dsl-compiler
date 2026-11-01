@@ -7,8 +7,9 @@ use yaml_dsl_compiler::output::{
     Attribute, Block, BodyItem, Expression, FunctionCall, Interpolation, ObjectKey, OutputFile,
     TemplatePart, Traversal,
 };
-use yaml_dsl_compiler::resolved::{self, Reference, Target, Value, ValueKind};
-use yaml_dsl_compiler::{Diagnostic, ResolvedUnit, TargetLanguage, Translator};
+use yaml_dsl_compiler::{ResolvedUnit, TargetLanguage, Translator};
+use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::resolved::{self, Reference, Target, Value, ValueKind};
 
 use crate::TranslatorSettings;
 

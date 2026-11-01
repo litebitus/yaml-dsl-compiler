@@ -380,6 +380,7 @@ dependencies = [
  "serde",
  "serde_json",
  "yaml-dsl-compiler",
+ "yaml-dsl-spec",
 ]
 
 [[package]]
@@ -898,8 +899,19 @@ version = "0.0.0"
 dependencies = [
  "fancy-regex 0.20.0",
  "globset",
- "jsonschema",
  "rayon",
+ "serde_json",
+ "yaml-dsl-spec",
+]
+
+[[package]]
+name = "yaml-dsl-spec"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "118fcd7440b8309e1cdccda72cd2be305a11a163252fb433155d95b5df871825"
+dependencies = [
+ "fancy-regex 0.20.0",
+ "jsonschema",
  "saphyr-parser",
  "serde",
  "serde_json",
