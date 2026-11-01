@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.1 — 2026-11-01
+
 - Compiler
   - Reads `yaml-dsl.yml` up to v1.2, through yaml-dsl-spec 0.1.2.
 
