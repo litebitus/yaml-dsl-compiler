@@ -33,6 +33,9 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Set up Rust
+        run: rustup toolchain install
+
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v4.0.1
         with:
