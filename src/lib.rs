@@ -29,6 +29,6 @@ pub use discover::Unit;
 pub use function_table::{CallKey, parse_call_key};
 pub use node::{Entry, Node, NodeKind};
 pub use position::Position;
-pub use schema::{DocumentSchema, SchemaProvider};
+pub use schema::{DocumentSchema, SchemaProvider, closest_name};
 pub use source::{FileSource, MemorySource};
 pub use writer::TargetLanguage;

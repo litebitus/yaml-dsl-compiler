@@ -127,7 +127,7 @@ impl LoadedSchema {
             None => "the document".to_owned(),
         };
         let suggestion = |name: &str, candidates: Vec<String>| {
-            closest(name, &candidates).map(|candidate| format!("did you mean `{candidate}`?"))
+            closest_name(name, &candidates).map(|candidate| format!("did you mean `{candidate}`?"))
         };
         match error.kind() {
             ValidationErrorKind::AdditionalProperties { unexpected }
@@ -255,7 +255,7 @@ fn collect_fields(
 
 /// The candidate closest in spelling to `name`, where one is close enough to be a
 /// likely fix and no other is as close.
-fn closest(name: &str, candidates: &[String]) -> Option<String> {
+pub fn closest_name(name: &str, candidates: &[String]) -> Option<String> {
     let mut ranked: Vec<(usize, &String)> = candidates
         .iter()
         .filter(|candidate| candidate.as_str() != name)

@@ -188,6 +188,7 @@ One crate, `yaml-dsl-compiler`:
 | `CompiledUnit` | a unit and either its written files or every error it holds |
 | `ResolvedUnit` | a unit's resolved document and the names it declares |
 | `json_path` | the definition's JSONPath subset, selecting nodes of a resolved document in document order |
+| `closest_name` | the candidate spelt closest to a name, where one is close enough to be a likely fix, for a caller's own errors to offer as their help |
 
 The library renders files and returns them; writing them to disk is the caller's.
 
