@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use fancy_regex::Regex;
 use yaml_dsl_spec::Diagnostic;
 use yaml_dsl_spec::Position;
+use yaml_dsl_spec::ValidationRules;
 use yaml_dsl_spec::definition::{DslDefinition, Scope};
 use yaml_dsl_spec::json_path::{PathSet, PathStep};
 use yaml_dsl_spec::resolved::{
@@ -63,7 +64,7 @@ pub struct Resolution {
     scanner: Scanner,
     declaration_rules: Vec<CompiledDeclarationRule>,
     regions: BTreeMap<String, PathSet>,
-    child_value_patterns: Vec<Regex>,
+    validation_rules: ValidationRules,
     schemas: SchemaCache,
     /// Common layers, parsed once however many units fold over them.
     common_layers: Mutex<BTreeMap<PathBuf, Result<Arc<Node>, Diagnostic>>>,
@@ -81,23 +82,15 @@ impl Resolution {
                 .map(|region| (region.as_str(), &[][..]));
             regions.insert(name.clone(), PathSet::parse(paths)?);
         }
-        let child_value_patterns = definition
-            .validator
-            .iter()
-            .flat_map(|validator| &validator.child_values_from_parent_key)
-            .map(|rule| {
-                Regex::new(&rule.pattern).map_err(|error| {
-                    Diagnostic::unplaced(format!("pattern `{}`: {error}", rule.pattern))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let validation_rules = ValidationRules::from_validator(definition.validator.as_ref())
+            .map_err(|error| Diagnostic::unplaced(format!("pattern {error}")))?;
         Ok(Self {
             definition,
             config_root,
             scanner,
             declaration_rules,
             regions,
-            child_value_patterns,
+            validation_rules,
             schemas: SchemaCache::default(),
             common_layers: Mutex::default(),
         })
@@ -188,7 +181,7 @@ impl Resolution {
         };
         let resolved = names.resolve(&expanded, &mut Vec::new(), &mut diagnostics);
         if diagnostics.is_empty() {
-            diagnostics.extend(schema.validate(&resolved, &self.child_value_patterns));
+            diagnostics.extend(schema.validate(&resolved, &self.validation_rules));
         }
         if !diagnostics.is_empty() {
             return Err(diagnostics);
@@ -202,7 +195,11 @@ impl Resolution {
         .in_document_order()
         .into_iter()
         .map(|declared| Declared {
-            value: with_child_values(&declared.value, &declared.key, &self.child_value_patterns),
+            value: with_child_values(
+                &declared.value,
+                &declared.key,
+                &self.validation_rules.child_value_patterns,
+            ),
             ..declared
         })
         .collect();
