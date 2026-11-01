@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.0 — 2026-11-01
+
 - Compiler
   - Discovers units, folds layers, expands macros, resolves names and validates against the document's schema.
   - Resolves key placeholders before the fold and lists a unit's declarations in document order.
