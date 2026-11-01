@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.2 — 2026-11-01
+
 - Compiler
   - Validates a document as yaml-dsl-spec 0.1.4 does: `merge_base_keys`, `allow_quoted_values` and requirement markers read, and each problem worded as the YAML DSL editor words it.
 

@@ -1,6 +1,6 @@
 [package]
 name = "yaml-dsl-compiler"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 description = "Compiles config-defined YAML DSLs into code: folds layers, expands macros, resolves references, and writes the target language."
