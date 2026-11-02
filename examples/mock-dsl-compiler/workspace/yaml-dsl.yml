@@ -6,7 +6,7 @@ dsls:
     file_excludes: []
     schema_search_paths: ["{config_root}/mock-dsl.schema.json"]
     layers:
-      overlay_folders: [dev, production]
+      overlay_folders: [dev, staging, production]
       common_layer_discovery: parent
       duplicate_check:
         depth: 2

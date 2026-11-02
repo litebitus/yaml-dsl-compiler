@@ -73,7 +73,7 @@ fn output_within_timeout(mut child: Child) -> Output {
 }
 
 fn overlays() -> Vec<&'static str> {
-    vec!["concern-1/dev", "concern-1/production"]
+    vec!["concern-1/dev", "concern-1/staging", "concern-1/production"]
 }
 
 #[test]

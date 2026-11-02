@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use yaml_dsl_spec::Diagnostic;
 use yaml_dsl_spec::definition::DslDefinition;
 
-use crate::discover::{Unit, selects, unit_of, units};
+use crate::discover::{Unit, overlays_holding_no_documents_at, selects, unit_of, units};
 use crate::output::OutputFile;
 use crate::resolve::Resolution;
 pub use crate::resolve::{BuiltinValues, ResolveOptions, ResolvedUnit};
@@ -76,6 +76,20 @@ impl Compiler {
             self.resolution.definition(),
             self.resolution.config_root(),
             document,
+            self.source.as_ref(),
+        )
+    }
+
+    /// The overlays holding no documents whose place is `directory`, each folding to
+    /// its common layer alone.
+    pub fn overlays_holding_no_documents_at(
+        &self,
+        directory: &Path,
+    ) -> Result<Vec<Unit>, Diagnostic> {
+        overlays_holding_no_documents_at(
+            self.resolution.definition(),
+            self.resolution.config_root(),
+            directory,
             self.source.as_ref(),
         )
     }

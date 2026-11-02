@@ -26,6 +26,9 @@ use crate::reference_scan::{NameReading, Reading, Resolver, Scanner, Strictness}
 use crate::schema_provider::SchemaProvider;
 use crate::source::FileSource;
 
+/// The document an overlay holding no documents reads as: an empty map.
+const EMPTY_DOCUMENT: &str = "{}\n";
+
 /// The values of a logical scope's builtin names, which the caller knows and the
 /// document does not, such as the environment an overlay deploys to.
 pub trait BuiltinValues: Send + Sync {
@@ -111,7 +114,11 @@ impl Resolution {
         options: &ResolveOptions<'_>,
     ) -> Result<ResolvedUnit, Vec<Diagnostic>> {
         let builtins = options.builtins;
-        let text = read(source, &unit.file).map_err(|diagnostic| vec![diagnostic])?;
+        let text = if unit.holds_no_documents {
+            EMPTY_DOCUMENT.to_owned()
+        } else {
+            read(source, &unit.file).map_err(|diagnostic| vec![diagnostic])?
+        };
         let file: Arc<str> = Arc::from(unit.file.to_string_lossy().as_ref());
         let document_start = Position::file_start(&file);
         let provider = options.schema_provider.ok_or_else(|| {
@@ -704,6 +711,7 @@ references:
             directory: PathBuf::from("/root/dev"),
             overlay: common_layer.map(|_| "dev".to_owned()),
             common_layer: common_layer.map(|_| PathBuf::from("/root/mock-dsl.yml")),
+            holds_no_documents: false,
         };
         let options = ResolveOptions {
             builtins: None,
@@ -745,6 +753,30 @@ references:
         assert_eq!(
             json(resolved.document.get("queue").unwrap()),
             serde_json::json!({"q-a": {"x": 1, "y": 2}})
+        );
+    }
+
+    #[test]
+    fn an_overlay_holding_no_documents_folds_to_its_common_layer_alone() {
+        let source =
+            MemorySource::new().with_file("/root/mock-dsl.yml", "queue:\n  q-a:\n    x: 1\n");
+        let resolution = Resolution::new(definition(), PathBuf::from("/root")).unwrap();
+        let unit = Unit {
+            id: "uat/mock-dsl.yml".into(),
+            file: PathBuf::from("/root/uat/mock-dsl.yml"),
+            directory: PathBuf::from("/root/uat"),
+            overlay: Some("uat".to_owned()),
+            common_layer: Some(PathBuf::from("/root/mock-dsl.yml")),
+            holds_no_documents: true,
+        };
+        let options = ResolveOptions {
+            builtins: None,
+            schema_provider: Some(&MockSchema),
+        };
+        let resolved = resolution.resolve(&unit, &source, &options).unwrap();
+        assert_eq!(
+            json(resolved.document.get("queue").unwrap()),
+            serde_json::json!({"q-a": {"x": 1}})
         );
     }
 

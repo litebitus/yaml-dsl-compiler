@@ -18,6 +18,9 @@ The compiler is a Rust library. Nothing about a particular DSL is compiled into 
 
 A unit is compiled whole in one pass, from its documents to its output files. Units are independent and compile in parallel.
 
+- An overlay holding no documents, as the standard's "Common layer and overlays" states, is a unit: it reads no file of its own, and folds to its common layer alone. Its schema is found from its place.
+- `Compiler::overlays_holding_no_documents_at` gives the overlays holding no documents whose place is a directory, for a caller that compiles one directory without listing the config root.
+
 ### Fold
 
 The overlay is merged over its common layer, key by key, at any depth:
