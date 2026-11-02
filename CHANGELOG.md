@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.4 — 2026-11-02
+
 - Compiler
   - An overlay directory holding no documents is an overlay of its stack, folding to its common layer alone; `Unit.holds_no_documents` marks it, and `Compiler::overlays_holding_no_documents_at` finds those at a directory.
 
