@@ -131,7 +131,7 @@ The output is generated code: nobody edits it, but people read and review it. Ea
 
 HCL style:
 
-- Two-space indentation.
+- Two-space indentation, by bracket depth as `terraform fmt` counts it: a line closing as many brackets as it opens, such as `} : name => merge(`, stays at the level of the lines inside, and a heredoc's body is kept as written.
 - A blank line on each side of a block and of an attribute holding a multi-line map; none between other attributes.
 - `=` aligned within a run of single-line attributes; a multi-line value or a comment ends the run, and a heredoc stays in it.
 - A list or map of three or more items is written one item per line with a trailing comma; one or two items stay inline when the line fits.

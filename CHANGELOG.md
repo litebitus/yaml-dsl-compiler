@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Writer
+  - HCL is indented as `terraform fmt` indents it, a line closing as many brackets as it opens kept at the inner level.
+
 ## v0.1.2 — 2026-11-01
 
 - Compiler

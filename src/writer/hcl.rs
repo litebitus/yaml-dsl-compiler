@@ -26,7 +26,7 @@ pub fn write(file: &OutputFile) -> Result<String, String> {
         .map(Item::of_body)
         .collect::<Result<_, _>>()?;
     lines.extend(item_lines(&items, 0)?);
-    let mut text = lines.join("\n");
+    let mut text = indent_by_brackets(lines).join("\n");
     text.push('\n');
     Ok(text)
 }
@@ -717,6 +717,141 @@ fn heredoc_lines(expression: &Expression, indent: usize) -> Result<Option<Vec<St
     Ok(Some(lines))
 }
 
+/// The lines indented as `terraform fmt` indents them, by the brackets each opens
+/// and closes: a line opening more than it closes nests the lines after it, and a
+/// line closing as many as it opens keeps the level of the lines before it. A
+/// heredoc's body and closing marker are kept as written.
+fn indent_by_brackets(lines: Vec<String>) -> Vec<String> {
+    let mut carried_brackets: Vec<usize> = Vec::new();
+    let mut heredoc_marker: Option<String> = None;
+    let mut indented = Vec::with_capacity(lines.len());
+    for line in lines {
+        if let Some(marker) = &heredoc_marker {
+            if line.trim() == marker {
+                heredoc_marker = None;
+            }
+            indented.push(line);
+            continue;
+        }
+        let text = line.trim_start();
+        if text.is_empty() {
+            indented.push(String::new());
+            continue;
+        }
+        let scanned = scan_brackets(text);
+        let level = match scanned.net_brackets {
+            net if net > 0 => {
+                let level = carried_brackets.len();
+                carried_brackets.push(net.unsigned_abs());
+                level
+            }
+            net if net < 0 => {
+                let mut closed = net.unsigned_abs();
+                while closed > 0 {
+                    let Some(carried) = carried_brackets.last_mut() else {
+                        break;
+                    };
+                    if closed < *carried {
+                        *carried -= closed;
+                        closed = 0;
+                    } else {
+                        closed -= *carried;
+                        carried_brackets.pop();
+                    }
+                }
+                carried_brackets.len()
+            }
+            _ => carried_brackets.len(),
+        };
+        indented.push(format!("{}{text}", spaces(level * INDENT_WIDTH)));
+        heredoc_marker = scanned.heredoc_marker;
+    }
+    indented
+}
+
+/// What a line's code does to the indentation: its opening brackets less its
+/// closing ones, and the marker of a heredoc it opens.
+struct ScannedBrackets {
+    net_brackets: isize,
+    heredoc_marker: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ScanContext {
+    Code,
+    QuotedText,
+    Interpolation { open_braces: usize },
+}
+
+/// The brackets of a line's code, outside its quoted text and its comment.
+fn scan_brackets(text: &str) -> ScannedBrackets {
+    let characters: Vec<char> = text.chars().collect();
+    let mut contexts = vec![ScanContext::Code];
+    let mut net_brackets = 0;
+    let mut index = 0;
+    while index < characters.len() {
+        let character = characters[index];
+        let next = characters.get(index + 1).copied();
+        let top = contexts.len() - 1;
+        match contexts[top] {
+            ScanContext::QuotedText => match character {
+                '\\' => index += 1,
+                '$' | '%' if next == Some(character) && characters.get(index + 2) == Some(&'{') => {
+                    index += 2;
+                }
+                '$' | '%' if next == Some('{') => {
+                    contexts.push(ScanContext::Interpolation { open_braces: 0 });
+                    index += 1;
+                }
+                '"' => {
+                    contexts.pop();
+                }
+                _ => {}
+            },
+            ScanContext::Interpolation { open_braces } => match character {
+                '{' => {
+                    contexts[top] = ScanContext::Interpolation {
+                        open_braces: open_braces + 1,
+                    };
+                }
+                '}' if open_braces == 0 => {
+                    contexts.pop();
+                }
+                '}' => {
+                    contexts[top] = ScanContext::Interpolation {
+                        open_braces: open_braces - 1,
+                    };
+                }
+                '"' => contexts.push(ScanContext::QuotedText),
+                _ => {}
+            },
+            ScanContext::Code => match character {
+                '(' | '[' | '{' => net_brackets += 1,
+                ')' | ']' | '}' => net_brackets -= 1,
+                '"' => contexts.push(ScanContext::QuotedText),
+                '#' => break,
+                '/' if next == Some('/') => break,
+                '<' if next == Some('<') => {
+                    let rest: String = characters[index + 2..].iter().collect();
+                    let marker = rest.strip_prefix('-').unwrap_or(&rest).trim();
+                    if is_identifier(marker) {
+                        return ScannedBrackets {
+                            net_brackets,
+                            heredoc_marker: Some(marker.to_owned()),
+                        };
+                    }
+                }
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+    ScannedBrackets {
+        net_brackets,
+        heredoc_marker: None,
+    }
+}
+
 fn comment_lines(comment: &str, indent: usize) -> Vec<String> {
     comment
         .lines()
@@ -1090,6 +1225,65 @@ mod tests {
                 "value = {{\n  for name, lookup in lookups : name => merge(\n    lookup,\n    \
                  \"{long}\",\n  ) if enabled\n}}\n"
             )
+        );
+    }
+
+    #[test]
+    fn a_line_closing_as_many_brackets_as_it_opens_keeps_the_inner_level() {
+        let long = "x".repeat(80);
+        let for_expression = Expression::For(Box::new(ForExpression {
+            key_variable: Some("name".into()),
+            value_variable: "lookup".into(),
+            collection: Expression::Map(vec![
+                (ObjectKey::Name("first".into()), string(&long)),
+                (ObjectKey::Name("second".into()), string(&long)),
+            ]),
+            key: Some(variable("name")),
+            value: Expression::Call(FunctionCall {
+                function: "merge".into(),
+                arguments: vec![variable("lookup"), string(&long)],
+                expand_final_argument: false,
+            }),
+            grouping: false,
+            condition: None,
+        }));
+        assert_eq!(
+            written_value(for_expression),
+            format!(
+                "value = {{\n  for name, lookup in {{\n    first  = \"{long}\"\n    second = \
+                 \"{long}\"\n    }} : name => merge(\n    lookup,\n    \"{long}\",\n  )\n}}\n"
+            )
+        );
+        let merge_of = |key: &str| {
+            Expression::Call(FunctionCall {
+                function: "merge".into(),
+                arguments: vec![Expression::Map(vec![(
+                    ObjectKey::Name(key.into()),
+                    string(&long),
+                )])],
+                expand_final_argument: false,
+            })
+        };
+        let conditional = Expression::Conditional(Box::new(Conditional {
+            condition: variable("enabled"),
+            if_true: merge_of("first"),
+            if_false: merge_of("second"),
+        }));
+        assert_eq!(
+            written_value(conditional),
+            format!(
+                "value = enabled ? merge({{\n  first = \"{long}\"\n  }}) : merge({{\n  second = \
+                 \"{long}\"\n}})\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_heredoc_body_keeps_its_lines_as_written() {
+        let text = "first {\n  second\n}\n";
+        assert_eq!(
+            written_value(string(text)),
+            "value = <<-EOT\n  first {\n    second\n  }\nEOT\n"
         );
     }
 
