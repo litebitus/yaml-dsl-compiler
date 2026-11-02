@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 /// the disk, so a caller decides what it sees: a working tree, an editor's open
 /// buffers, or an in-memory fixture.
 pub trait FileSource: Send + Sync {
-    /// Every file under `directory`, at any depth.
+    /// Every file under `directory`, at any depth; none where `directory` does not exist.
     fn list_files(&self, directory: &Path) -> io::Result<Vec<PathBuf>>;
 
     fn read(&self, path: &Path) -> io::Result<String>;

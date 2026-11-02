@@ -209,7 +209,9 @@ pub fn overlays_holding_no_documents_at(
     let mut overlays: Vec<Unit> = Vec::new();
     for (_, sibling_directory) in sibling_directories(layers, &relative) {
         let sibling_directory = config_root.join(sibling_directory);
-        let listed = source.list_files(&sibling_directory).unwrap_or_default();
+        let listed = source.list_files(&sibling_directory).map_err(|error| {
+            Diagnostic::unplaced(format!("listing {}: {error}", sibling_directory.display()))
+        })?;
         for path in listed {
             if path.parent() != Some(sibling_directory.as_path()) {
                 continue;
@@ -568,6 +570,37 @@ mod tests {
             &source,
         );
         assert_eq!(with_its_document.unwrap(), []);
+    }
+
+    struct UnlistableSource(MemorySource);
+
+    impl FileSource for UnlistableSource {
+        fn list_files(&self, _directory: &Path) -> std::io::Result<Vec<PathBuf>> {
+            Err(std::io::Error::other("mock listing refused"))
+        }
+
+        fn read(&self, path: &Path) -> std::io::Result<String> {
+            self.0.read(path)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.0.exists(path)
+        }
+    }
+
+    #[test]
+    fn a_sibling_overlay_directory_that_cannot_be_listed_is_an_error() {
+        let definition = definition(
+            r#"{"overlay_folders": ["overlay-1", "overlay-2"], "common_layer_discovery": "parent"}"#,
+        );
+        let source = UnlistableSource(source(&["concern-1/mock-dsl.yml"]));
+        let listed = overlays_holding_no_documents_at(
+            &definition,
+            Path::new("/root"),
+            Path::new("/root/concern-1/overlay-2"),
+            &source,
+        );
+        assert!(listed.unwrap_err().message.contains("mock listing refused"));
     }
 
     #[test]

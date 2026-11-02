@@ -11,6 +11,9 @@ pub struct WorkingTree;
 impl FileSource for WorkingTree {
     fn list_files(&self, directory: &Path) -> io::Result<Vec<PathBuf>> {
         let mut files = Vec::new();
+        if !directory.is_dir() {
+            return Ok(files);
+        }
         for entry in WalkBuilder::new(directory)
             .hidden(true)
             .git_ignore(true)

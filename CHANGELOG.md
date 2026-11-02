@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Compiler
+  - A sibling overlay directory that cannot be listed is an error naming it; a `FileSource` lists no files for a directory that does not exist.
+
 ## v0.1.4 — 2026-11-02
 
 - Compiler
