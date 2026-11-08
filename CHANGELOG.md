@@ -4,6 +4,7 @@
 
 - Compiler
   - Schema errors follow the standard's wording: every key and value a message names is fenced, and a schema's description is the problem's schema note.
+  - An unknown field or item beside a reference, a call or a template is reported, unless the schema could read it through a branch that reads that value.
 
 ## v0.1.5 — 2026-11-02
 

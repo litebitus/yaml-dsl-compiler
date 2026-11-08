@@ -11,4 +11,4 @@ ignore = "=0.4.34"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 yaml-dsl-compiler = { path = "../.." }
-yaml-dsl-spec = "=0.1.5-snapshot.20261108020000"
+yaml-dsl-spec.workspace = true
