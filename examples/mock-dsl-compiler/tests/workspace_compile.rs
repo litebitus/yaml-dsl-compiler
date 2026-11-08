@@ -107,7 +107,7 @@ fn an_error_names_its_place_and_its_unit_writes_nothing() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     let expected_place = format!(
-        "{}:3:17: `visibility` must be integer",
+        "{}:3:17: `visibility` must be `integer`",
         overlay.canonicalize().unwrap().display()
     );
     assert!(stderr.contains(&expected_place), "{stderr}");

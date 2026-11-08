@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Compiler
+  - Schema errors follow the standard's wording: every key and value a message names is fenced, and a schema's description is the problem's schema note.
+
 ## v0.1.5 — 2026-11-02
 
 - Compiler
