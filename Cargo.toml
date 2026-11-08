@@ -13,7 +13,7 @@ categories = ["compilers", "development-tools"]
 members = ["examples/mock-dsl-compiler"]
 
 [workspace.dependencies]
-yaml-dsl-spec = "=0.1.5-snapshot.20261108032020"
+yaml-dsl-spec = "=0.1.5-snapshot.20261108035128"
 
 [dependencies]
 fancy-regex = "0.20.0"
