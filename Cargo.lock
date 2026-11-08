@@ -906,9 +906,9 @@ dependencies = [
 
 [[package]]
 name = "yaml-dsl-spec"
-version = "0.1.5-snapshot.20261108035128"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2919298c352b3e23ecf6f0898491f66002e5c50ad84fd69c24bb90c4b7c81c9"
+checksum = "35be3c3e17db162063ff1f5d7e255b9f0087508cf18a0f80d67718dac7b9def6"
 dependencies = [
  "fancy-regex 0.20.0",
  "jsonschema",
