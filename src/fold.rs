@@ -40,6 +40,7 @@ pub fn deep_merge(base: &Node, overlay: &Node) -> Node {
 mod tests {
     use std::sync::Arc;
 
+    use yaml_dsl_spec::Position;
     use yaml_dsl_spec::yaml_reader::parse;
 
     use super::*;
@@ -88,6 +89,52 @@ mod tests {
             merged.to_json(),
             serde_json::json!({"a": 1, "b": {}, "c": []})
         );
+    }
+
+    fn layer(file: &str, text: &str) -> Node {
+        parse(&Arc::from(file), text, &[]).unwrap()
+    }
+
+    fn place(position: &Position) -> (&str, usize, usize) {
+        (position.file.as_ref(), position.line, position.column)
+    }
+
+    #[test]
+    fn each_part_keeps_the_place_in_the_layer_file_that_wrote_it() {
+        let merged = deep_merge(
+            &layer(
+                "mock-common.yml",
+                "queue:\n  orders:\n    visibility: 30\n    retention: 1\n",
+            ),
+            &layer(
+                "mock-overlay.yml",
+                "locals:\n  a: 1\nqueue:\n  orders:\n    visibility: 60\n",
+            ),
+        );
+        let queue_entry = merged
+            .entries()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.key == "queue")
+            .unwrap();
+        let orders_entry = queue_entry
+            .value
+            .entries()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.key == "orders")
+            .unwrap();
+        let orders = &orders_entry.value;
+        assert_eq!(
+            place(&orders.get("retention").unwrap().position),
+            ("mock-common.yml", 4, 16)
+        );
+        assert_eq!(
+            place(&orders.get("visibility").unwrap().position),
+            ("mock-overlay.yml", 5, 17)
+        );
+        assert_eq!(place(&orders_entry.key_position), ("mock-common.yml", 2, 3));
+        assert_eq!(place(&orders.position), ("mock-overlay.yml", 5, 5));
     }
 
     #[test]
