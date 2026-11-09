@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Compiler
+  - An unknown field reads `` `name` is not defined in the schema ``, with no label, as the standard words it.
+
 ## v0.1.6 — 2026-11-08
 
 - Compiler
