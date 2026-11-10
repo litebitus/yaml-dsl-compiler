@@ -4,6 +4,12 @@
 
 - Compiler
   - An unknown field reads `` `name` is not defined in the schema ``, with no label, as the standard words it.
+  - A merge base key's content requires no field.
+  - A merge whose content is not known when the document compiles is validated as its known maps, requiring no field.
+  - An `anyOf` or `oneOf` beside a value not known yet is reported when each of its forms fails regardless of that value.
+  - A dependency message names what the key needs from every `allOf` part and reference of its schema.
+  - A schema note is the schema's description verbatim, its requiredness marker included.
+  - A schema whose `$ref` names no node, or whose pattern does not compile, is reported in the standard's words.
 
 ## v0.1.6 — 2026-11-08
 
