@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.7 — 2026-11-10
+
 - Compiler
   - An unknown field reads `` `name` is not defined in the schema ``, with no label, as the standard words it.
   - A merge base key's content requires no field.
