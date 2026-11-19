@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.8 — 2026-11-19
+
 - Compiler
   - A loop whose collection is known only when the document is used is left for the target as a loop, its loop variables read as themselves.
 
