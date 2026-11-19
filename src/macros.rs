@@ -11,7 +11,9 @@ use yaml_dsl_spec::function_table::{
     CallKey, FunctionEntry, FunctionTable, MacroEntry, MacroKind, MergeBehavior, parse_call_key,
 };
 use yaml_dsl_spec::json_path::{PathSet, PathStep};
-use yaml_dsl_spec::resolved::{Call, MapEntry, Reference, Target, Value, ValueKind};
+use yaml_dsl_spec::resolved::{
+    Call, Loop, LoopBody, LoopEntry, MapEntry, Reference, Target, Value, ValueKind,
+};
 
 use crate::reference_scan::{NameReading, Reading, Scanner, Strictness};
 
@@ -50,10 +52,12 @@ enum CallYield<'t> {
     Nothing,
 }
 
-/// What a loop yields: entries for a map body, items for a list body.
+/// What a loop yields: entries for a map body, items for a list body, or the loop
+/// itself when its collection is not known when the document compiles.
 enum LoopYield {
     Entries(Vec<MapEntry>),
     Items(Vec<Value>),
+    LeftForTarget(Value),
 }
 
 impl<'a> Expander<'a> {
@@ -214,6 +218,20 @@ impl<'a> Expander<'a> {
             else {
                 return Reading::Keep;
             };
+            if let ValueKind::Reference(Reference {
+                target: Target::LoopVariable,
+                ..
+            }) = &bound.kind
+            {
+                return Reading::Reference(Reference {
+                    scope: scope.to_owned(),
+                    scope_key: None,
+                    name: reading.name.clone(),
+                    path: reading.path.clone(),
+                    text: reading.text.clone(),
+                    target: Target::LoopVariable,
+                });
+            }
             return match step_into(
                 bound,
                 &reading.path,
@@ -421,6 +439,7 @@ impl<'a> Expander<'a> {
                         ValueKind::List(items),
                         entry.value.position.clone(),
                     )),
+                    Some(LoopYield::LeftForTarget(left)) => CallYield::Value(left),
                     None => CallYield::Nothing,
                 }
             }
@@ -561,6 +580,23 @@ impl<'a> Expander<'a> {
                     .map(|entry| (Value::string(entry.key, entry.key_position), entry.value))
                     .collect()
             }
+            ValueKind::String(_) | ValueKind::Reference(_) | ValueKind::Call(_) => {
+                let left = Loop {
+                    body: self.body_left_for_target(
+                        &variables,
+                        &body,
+                        path,
+                        bindings,
+                        diagnostics,
+                    )?,
+                    variables,
+                    collection: Box::new(collection),
+                };
+                return Some(LoopYield::LeftForTarget(Value::new(
+                    ValueKind::Loop(left),
+                    entry.value.position.clone(),
+                )));
+            }
             _ => {
                 diagnostics.push(Diagnostic::at(
                     &collection.position,
@@ -613,6 +649,87 @@ impl<'a> Expander<'a> {
         } else {
             LoopYield::Entries(yielded_entries)
         })
+    }
+
+    /// A loop's body expanded once for the target to repeat, each loop variable
+    /// read as itself: a list body's one element, or a map body's one entry.
+    fn body_left_for_target(
+        &self,
+        variables: &[String],
+        body: &Value,
+        path: &mut Vec<PathStep>,
+        bindings: &Bindings,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Option<LoopBody> {
+        let mut body_bindings = bindings.clone();
+        for variable in variables {
+            let read_as_itself = Reference {
+                scope: self.loop_scope.clone().unwrap_or_default(),
+                scope_key: None,
+                name: variable.clone(),
+                path: String::new(),
+                text: variable.clone(),
+                target: Target::LoopVariable,
+            };
+            body_bindings.push((
+                variable.clone(),
+                Value::new(ValueKind::Reference(read_as_itself), body.position.clone()),
+            ));
+        }
+        match &body.kind {
+            ValueKind::List(items) if items.len() == 1 => Some(LoopBody::Item(Box::new(
+                self.expand(&items[0], path, &body_bindings, diagnostics),
+            ))),
+            ValueKind::Map(entries) => {
+                let mut loop_entries = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    if self
+                        .marker
+                        .is_some_and(|marker| parse_call_key(&entry.key, marker).is_some())
+                    {
+                        diagnostics.push(Diagnostic::at(
+                            &entry.key_position,
+                            "a loop whose collection is known only when the document is used has no call as a key of its map body",
+                        ));
+                        return None;
+                    }
+                    let mut resolve =
+                        |reading: &NameReading<'_>| self.read(reading, &body_bindings);
+                    let key = match self.scanner.scan(
+                        &entry.key,
+                        &entry.key_position,
+                        path,
+                        Strictness::Lenient,
+                        &mut resolve,
+                    ) {
+                        Ok(key) => key,
+                        Err(diagnostic) => {
+                            diagnostics.push(diagnostic);
+                            return None;
+                        }
+                    };
+                    path.push(PathStep::Key(entry.key.clone()));
+                    let value = self.expand(&entry.value, path, &body_bindings, diagnostics);
+                    path.pop();
+                    loop_entries.push(LoopEntry { key, value });
+                }
+                Some(LoopBody::Entries(loop_entries))
+            }
+            ValueKind::List(_) => {
+                diagnostics.push(Diagnostic::at(
+                    &body.position,
+                    "a loop's list body holds one element",
+                ));
+                None
+            }
+            _ => {
+                diagnostics.push(Diagnostic::at(
+                    &body.position,
+                    "a loop's body is a map or a list of one element",
+                ));
+                None
+            }
+        }
     }
 
     fn function_call_macro(

@@ -90,8 +90,10 @@ What Resolve hands the translator: the folded, expanded document as a tree of va
 | map | key and value pairs in document order |
 | reference | the scope and name it reads, its path into the declaration, and the declaration it resolves to |
 | call | a function call left for the target to evaluate: the function and its arguments |
+| loop | a loop left for the target to repeat: its loop variables, its collection, and the item or the entries one pass yields |
 
 - A macro is expanded, so the resolved document holds what it expands to and never the macro call.
+- A loop whose collection is known only when the document is used is left for the target: its body is expanded once, each loop variable read as a reference to itself.
 - A function is not evaluated: it belongs to the target, so its call stays a call.
 - A placeholder in a scalar resolves to a constant where every name it reads holds one, and otherwise to a template of text and references.
 - A placeholder written after the definition's `escape_prefix` is text, with the prefix dropped.

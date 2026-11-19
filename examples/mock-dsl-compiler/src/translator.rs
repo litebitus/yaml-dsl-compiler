@@ -1,11 +1,12 @@
 //! Translates the mock DSL into HCL: each entry is a module of the component its
 //! type names, and each output an output block.
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 
 use yaml_dsl_compiler::output::{
-    Attribute, Block, BodyItem, Expression, FunctionCall, Interpolation, ObjectKey, OutputFile,
-    TemplatePart, Traversal,
+    Attribute, Block, BodyItem, Expression, FunctionCall, Interpolation, LoopSymbols, ObjectKey,
+    OutputFile, TemplatePart, Traversal, loop_expression,
 };
 use yaml_dsl_compiler::{ResolvedUnit, TargetLanguage, Translator};
 use yaml_dsl_spec::Diagnostic;
@@ -147,6 +148,31 @@ fn expression(value: &Value, diagnostics: &mut Vec<Diagnostic>) -> Expression {
                 .collect(),
         ),
         ValueKind::Reference(reference) => reference_expression(reference, value, diagnostics),
+        ValueKind::Loop(left) => {
+            let symbols = match left.variables.as_slice() {
+                [item] => LoopSymbols {
+                    key: None,
+                    item: item.clone(),
+                },
+                [key, item] => LoopSymbols {
+                    key: Some(key.clone()),
+                    item: item.clone(),
+                },
+                _ => {
+                    diagnostics.push(Diagnostic::at(
+                        &value.position,
+                        "a loop takes one or two loop variables",
+                    ));
+                    return Expression::Null;
+                }
+            };
+            let collection = expression(&left.collection, diagnostics);
+            let written: Result<Expression, Infallible> =
+                loop_expression(collection, &left.body, &symbols, |body_value| {
+                    Ok(expression(body_value, diagnostics))
+                });
+            written.unwrap_or_else(|never| match never {})
+        }
         ValueKind::Call(call) => Expression::Call(FunctionCall {
             function: call.function.clone(),
             arguments: call
@@ -179,6 +205,10 @@ fn reference_expression(
 ) -> Expression {
     match (&reference.target, &reference.scope_key) {
         (Target::Local(local), _) => expression(local, diagnostics),
+        (Target::LoopVariable, _) => {
+            let fields = reference.path.split('.').filter(|field| !field.is_empty());
+            Expression::Traversal(Traversal::of_names(reference.name.as_str(), fields))
+        }
         (Target::Declaration { .. }, Some(entry_type)) => {
             let module = module_name(entry_type, &reference.name);
             let fields = reference.path.split('.').filter(|field| !field.is_empty());

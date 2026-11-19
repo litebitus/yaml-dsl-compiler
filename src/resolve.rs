@@ -12,7 +12,8 @@ use yaml_dsl_spec::ValidationRules;
 use yaml_dsl_spec::definition::{DslDefinition, Scope};
 use yaml_dsl_spec::json_path::{PathSet, PathStep};
 use yaml_dsl_spec::resolved::{
-    Declared, MapEntry, Reference, Target, TemplatePart, Value, ValueKind,
+    Declared, Loop, LoopBody, LoopEntry, MapEntry, Reference, Target, TemplatePart, Value,
+    ValueKind,
 };
 use yaml_dsl_spec::schema::{SchemaCache, child_value};
 use yaml_dsl_spec::yaml_reader::parse;
@@ -504,6 +505,40 @@ impl NameResolver<'_> {
                     .collect();
                 Value::new(ValueKind::Template(parts), value.position.clone())
             }
+            ValueKind::Loop(left) => {
+                let collection = self.resolve(&left.collection, path, diagnostics);
+                if let ValueKind::Null
+                | ValueKind::Bool(_)
+                | ValueKind::Number(_)
+                | ValueKind::String(_)
+                | ValueKind::Template(_) = collection.local_value().kind
+                {
+                    diagnostics.push(Diagnostic::at(
+                        &collection.position,
+                        "a loop's collection must be a list or a map",
+                    ));
+                }
+                let body = match &left.body {
+                    LoopBody::Item(item) => {
+                        LoopBody::Item(Box::new(self.resolve(item, path, diagnostics)))
+                    }
+                    LoopBody::Entries(entries) => LoopBody::Entries(
+                        entries
+                            .iter()
+                            .map(|entry| LoopEntry {
+                                key: self.resolve(&entry.key, path, diagnostics),
+                                value: self.resolve(&entry.value, path, diagnostics),
+                            })
+                            .collect(),
+                    ),
+                };
+                let resolved = Loop {
+                    variables: left.variables.clone(),
+                    collection: Box::new(collection),
+                    body,
+                };
+                Value::new(ValueKind::Loop(resolved), value.position.clone())
+            }
             ValueKind::Null | ValueKind::Bool(_) | ValueKind::Number(_) => value.clone(),
         }
     }
@@ -854,6 +889,122 @@ references:
         assert_eq!(
             json(document.get("queue").unwrap()),
             serde_json::json!({"q-a": {"label": "a queue"}, "q-b": {"label": "b queue"}})
+        );
+    }
+
+    fn loop_at(document: &Value, entry: &str, field: &str) -> Loop {
+        let value = document
+            .get("queue")
+            .and_then(|queue| queue.get(entry))
+            .and_then(|found| found.get(field))
+            .unwrap();
+        let ValueKind::Loop(left) = &value.kind else {
+            panic!("{value:?}")
+        };
+        left.clone()
+    }
+
+    fn loop_variable(value: &Value) -> (&str, &str) {
+        let ValueKind::Reference(Reference {
+            name,
+            path,
+            target: Target::LoopVariable,
+            ..
+        }) = &value.kind
+        else {
+            panic!("{value:?}")
+        };
+        (name, path)
+    }
+
+    #[test]
+    fn a_loop_over_a_declaration_is_left_to_the_target_its_variable_read_as_itself() {
+        let document = resolve(concat!(
+            "queue:\n  p:\n    a: 1\n",
+            "  q:\n    labels fn.loop:\n      in: ref queue.p\n",
+            "      body:\n        - ~it.label\n",
+        ))
+        .unwrap();
+        let left = loop_at(&document, "q", "labels");
+        assert_eq!(left.variables, ["it"]);
+        assert!(matches!(
+            &left.collection.kind,
+            ValueKind::Reference(Reference {
+                target: Target::Declaration { .. },
+                ..
+            })
+        ));
+        let LoopBody::Item(item) = &left.body else {
+            panic!("{:?}", left.body)
+        };
+        assert_eq!(loop_variable(item), ("it", ".label"));
+    }
+
+    #[test]
+    fn a_map_body_left_to_the_target_reads_its_variables_in_its_key_and_value() {
+        let document = resolve(concat!(
+            "queue:\n  p:\n    a: 1\n",
+            "  q:\n    labels fn.loop:\n      for: [name, item]\n      in: ref queue.p\n",
+            "      body:\n        q-${~name}: ~item\n        fixed: 1\n",
+        ))
+        .unwrap();
+        let left = loop_at(&document, "q", "labels");
+        assert_eq!(left.variables, ["name", "item"]);
+        let LoopBody::Entries(entries) = &left.body else {
+            panic!("{:?}", left.body)
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].key.as_str(), Some("fixed"));
+        let LoopEntry { key, value } = &entries[0];
+        let ValueKind::Template(parts) = &key.kind else {
+            panic!("{key:?}")
+        };
+        assert_eq!(parts[0], TemplatePart::Text("q-".to_owned()));
+        let TemplatePart::Reference(read) = &parts[1] else {
+            panic!("{parts:?}")
+        };
+        assert_eq!(
+            (read.name.as_str(), &read.target),
+            ("name", &Target::LoopVariable)
+        );
+        assert_eq!(loop_variable(value), ("item", ""));
+    }
+
+    #[test]
+    fn a_loop_over_a_call_is_left_to_the_target() {
+        let document = resolve(concat!(
+            "queue:\n  q:\n    labels fn.loop:\n      in:\n        fn.encode: [a]\n",
+            "      body:\n        - ~it\n",
+        ))
+        .unwrap();
+        let left = loop_at(&document, "q", "labels");
+        assert!(matches!(&left.collection.kind, ValueKind::Call(_)));
+    }
+
+    #[test]
+    fn a_call_as_a_map_body_key_left_to_the_target_is_an_error() {
+        let errors = resolve(concat!(
+            "queue:\n  p:\n    a: 1\n",
+            "  q:\n    labels fn.loop:\n      in: ref queue.p\n",
+            "      body:\n        tags fn.encode: [a]\n",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "a loop whose collection is known only when the document is used has no call as a key of its map body"
+        );
+    }
+
+    #[test]
+    fn a_loop_over_text_is_an_error() {
+        let errors = resolve(concat!(
+            "queue:\n  q:\n    labels fn.loop:\n      in: mock-text\n",
+            "      body:\n        - ~it\n",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "a loop's collection must be a list or a map"
         );
     }
 
