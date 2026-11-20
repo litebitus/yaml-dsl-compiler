@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Compiler
+  - A declaration whose merge is left for the target keeps the field a `child_values_from_parent_key` pattern reads from its key, as one of the merge's own fields.
+
 ## v0.1.8 — 2026-11-19
 
 - Compiler

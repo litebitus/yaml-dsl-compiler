@@ -10,9 +10,10 @@ use yaml_dsl_spec::Diagnostic;
 use yaml_dsl_spec::Position;
 use yaml_dsl_spec::ValidationRules;
 use yaml_dsl_spec::definition::{DslDefinition, Scope};
+use yaml_dsl_spec::function_table::{FunctionTable, MacroKind};
 use yaml_dsl_spec::json_path::{PathSet, PathStep};
 use yaml_dsl_spec::resolved::{
-    Declared, Loop, LoopBody, LoopEntry, MapEntry, Reference, Target, TemplatePart, Value,
+    Call, Declared, Loop, LoopBody, LoopEntry, MapEntry, Reference, Target, TemplatePart, Value,
     ValueKind,
 };
 use yaml_dsl_spec::schema::{SchemaCache, child_value};
@@ -207,6 +208,7 @@ impl Resolution {
                 &declared.value,
                 &declared.key,
                 &self.validation_rules.child_value_patterns,
+                &schema.table,
             ),
             ..declared
         })
@@ -372,24 +374,69 @@ fn fold_layers(common: Option<&Node>, overlay: &Node) -> Node {
 }
 
 /// `value` with the field its declaring key sets, placed first, unless the value
-/// writes the field itself.
-fn with_child_values(value: &Value, key: &str, patterns: &[Regex]) -> Value {
-    let (Some(entries), Some((field, field_value))) = (value.entries(), child_value(key, patterns))
-    else {
+/// writes the field itself. A merge left for the target takes the field in its
+/// own fields, the map its last argument merges over the contents.
+fn with_child_values(value: &Value, key: &str, patterns: &[Regex], table: &FunctionTable) -> Value {
+    let Some((field, field_value)) = child_value(key, patterns) else {
         return value.clone();
     };
-    if entries.iter().any(|entry| entry.key == field) {
-        return value.clone();
-    }
-    let set = MapEntry {
+    let field_entry = MapEntry {
         key: field,
         key_position: value.position.clone(),
         value: Value::string(field_value, value.position.clone()),
     };
-    let entries = std::iter::once(set)
+    match &value.kind {
+        ValueKind::Map(entries) => with_field_first(value, entries, field_entry),
+        ValueKind::Call(call) if is_merge_macro(table, &call.function) => {
+            let own_fields = match call.arguments.last() {
+                Some(last) if !call.expand_final_argument => {
+                    last.entries().map(|entries| (last, entries))
+                }
+                _ => None,
+            };
+            let arguments = match own_fields {
+                Some((last, entries)) => {
+                    let mut arguments = call.arguments.clone();
+                    let last_index = arguments.len() - 1;
+                    arguments[last_index] = with_field_first(last, entries, field_entry);
+                    arguments
+                }
+                None => {
+                    let own_fields =
+                        Value::new(ValueKind::Map(vec![field_entry]), value.position.clone());
+                    if call.expand_final_argument {
+                        vec![value.clone(), own_fields]
+                    } else {
+                        call.arguments.iter().cloned().chain([own_fields]).collect()
+                    }
+                }
+            };
+            Value::new(
+                ValueKind::Call(Call::new(call.function.clone(), arguments)),
+                value.position.clone(),
+            )
+        }
+        _ => value.clone(),
+    }
+}
+
+/// `map`, whose entries are `entries`, with `field_entry` placed first, unless it
+/// holds the field's key.
+fn with_field_first(map: &Value, entries: &[MapEntry], field_entry: MapEntry) -> Value {
+    if entries.iter().any(|entry| entry.key == field_entry.key) {
+        return map.clone();
+    }
+    let entries = std::iter::once(field_entry)
         .chain(entries.iter().cloned())
         .collect();
-    Value::new(ValueKind::Map(entries), value.position.clone())
+    Value::new(ValueKind::Map(entries), map.position.clone())
+}
+
+fn is_merge_macro(table: &FunctionTable, function: &str) -> bool {
+    table
+        .entry(function)
+        .and_then(|called| called.macro_entry.as_ref())
+        .is_some_and(|macro_entry| matches!(macro_entry.kind, MacroKind::Merge))
 }
 
 fn read(source: &dyn FileSource, path: &Path) -> Result<String, Diagnostic> {
@@ -860,6 +907,67 @@ references:
             serde_json::json!({"name": "mock-orders", "x": 2})
         );
         assert_eq!(resolved.declarations[1].scope_key.as_deref(), Some("queue"));
+    }
+
+    fn merge_arguments(value: &Value) -> Vec<Value> {
+        match &value.kind {
+            ValueKind::Call(call) if call.function == "merge" => call.arguments.clone(),
+            other => panic!("not a merge call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_merge_left_for_the_target_takes_the_key_field_in_its_own_fields() {
+        let resolved = resolve_layers(
+            None,
+            concat!(
+                "locals:\n  policy fn.encode: x\n",
+                "queue:\n  name mock-orders:\n    fn.merge: local.policy\n    x: 2\n",
+            ),
+        )
+        .unwrap();
+        let arguments = merge_arguments(&resolved.declarations[1].value);
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(
+            json(&arguments[1]),
+            serde_json::json!({"name": "mock-orders", "x": 2})
+        );
+    }
+
+    #[test]
+    fn a_merge_left_for_the_target_with_no_own_fields_gains_the_key_field_as_one() {
+        let resolved = resolve_layers(
+            None,
+            concat!(
+                "locals:\n  policy fn.encode: x\n",
+                "queue:\n  name mock-orders:\n    fn.merge: local.policy\n",
+            ),
+        )
+        .unwrap();
+        let arguments = merge_arguments(&resolved.declarations[1].value);
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(
+            json(&arguments[1]),
+            serde_json::json!({"name": "mock-orders"})
+        );
+    }
+
+    #[test]
+    fn a_merge_left_for_the_target_keeps_the_key_field_its_own_fields_state() {
+        let resolved = resolve_layers(
+            None,
+            concat!(
+                "locals:\n  policy fn.encode: x\n",
+                "queue:\n  name mock-orders:\n    fn.merge: local.policy\n",
+                "    name: mock-orders\n    x: 2\n",
+            ),
+        )
+        .unwrap();
+        let arguments = merge_arguments(&resolved.declarations[1].value);
+        assert_eq!(
+            json(&arguments[1]),
+            serde_json::json!({"name": "mock-orders", "x": 2})
+        );
     }
 
     fn json(value: &Value) -> serde_json::Value {
