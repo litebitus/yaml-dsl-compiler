@@ -95,6 +95,25 @@ impl Scanner {
         })
     }
 
+    /// Whether a reference rule standing at `whole_scalar` reads all of `text`.
+    pub fn reads_whole(&self, text: &str) -> bool {
+        self.rules
+            .iter()
+            .filter(|compiled| {
+                compiled
+                    .rule
+                    .positions
+                    .contains(&ReferencePosition::WholeScalar)
+            })
+            .any(|compiled| match compiled.regex.find(text) {
+                Ok(Some(found)) => {
+                    found.start() == 0
+                        && (compiled.rule.text_after_name_allowed || found.end() == text.len())
+                }
+                _ => false,
+            })
+    }
+
     /// Reads `text`, written at `position` and document `path`, handing each name a
     /// rule reads to `resolve`.
     pub fn scan(
@@ -122,6 +141,30 @@ impl Scanner {
             parts = vec![part];
         }
         Ok(assemble(parts, position))
+    }
+
+    /// Reads the placeholders in `text`, a piece of a template, as `scan` reads a
+    /// scalar's, with no reading of the piece as a whole scalar.
+    pub fn scan_placeholders(
+        &self,
+        text: &str,
+        position: &Position,
+        path: &[PathStep],
+        strictness: Strictness,
+        resolve: &mut Resolver<'_>,
+    ) -> Result<Vec<TemplatePart>, Diagnostic> {
+        if self.unscanned.covers(path) {
+            return Ok(vec![TemplatePart::Text(text.to_owned())]);
+        }
+        let parts = self.placeholder_parts(text, position, strictness, resolve)?;
+        Ok(parts
+            .into_iter()
+            .map(|part| match part {
+                Part::Text(text) => TemplatePart::Text(text),
+                Part::Reference(reference) => TemplatePart::Reference(reference),
+                Part::Value(value) => TemplatePart::Text(value.scalar_text().unwrap_or_default()),
+            })
+            .collect())
     }
 
     /// Reads `text` where only a constant may result, such as a key.

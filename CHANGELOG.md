@@ -6,6 +6,7 @@
 
 - Compiler
   - A declaration whose merge is left for the target keeps the field a `child_values_from_parent_key` pattern reads from its key, as one of the merge's own fields.
+  - A placeholder reading a local inside longer text whose value is known only when the document is used, such as a reference, stays a reference to the local, so that its text is never spliced in.
 - HCL writer
   - A map key that is a reference with steps, such as `aws.dns`, is written bare, so that a Terraform `providers` map, which reads its keys as written, accepts it.
 

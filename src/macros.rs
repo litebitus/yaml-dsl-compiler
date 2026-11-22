@@ -271,12 +271,25 @@ impl<'a> Expander<'a> {
                 target,
             };
             return match stepped {
-                Some(stepped) if !reading.whole => Reading::Value(stepped),
+                Some(stepped) if !reading.whole && !self.known_when_used(&stepped) => {
+                    Reading::Value(stepped)
+                }
                 Some(stepped) => Reading::Reference(reference(Target::Local(Box::new(stepped)))),
                 None => Reading::Reference(reference(Target::LocalUnknown)),
             };
         }
         Reading::Keep
+    }
+
+    /// Whether a local's value is known only when the document is used: a call, a
+    /// reference, a template holding one, or text a reference rule reads whole, since
+    /// a reference to anything but a local stays as written.
+    fn known_when_used(&self, value: &Value) -> bool {
+        match &value.local_value().kind {
+            ValueKind::String(text) => self.scanner.reads_whole(text),
+            ValueKind::Call(_) | ValueKind::Reference(_) | ValueKind::Template(_) => true,
+            _ => false,
+        }
     }
 
     fn expand_map(

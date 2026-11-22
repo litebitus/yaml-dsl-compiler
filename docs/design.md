@@ -99,6 +99,7 @@ What Resolve hands the translator: the folded, expanded document as a tree of va
 - A placeholder written after the definition's `escape_prefix` is text, with the prefix dropped.
 - A reference keeps both what it reads and what that resolves to, so the translator decides whether the target sees a reference or the value.
 - A reference to a local whose path reaches into a value known only when the document is used, such as a field of a call's result, resolves to the reference alone.
+- A placeholder reading such a local inside longer text stays a reference to the local, among the template's other parts.
 
 Beside the document, Resolve lists the names it declares in document order: each with its scope, the key the scope is named by, the declaring key, its path and its value. The value carries the field its key sets by the definition's `child_values_from_parent_key`, first, unless the value writes that field itself.
 

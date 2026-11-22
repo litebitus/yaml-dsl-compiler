@@ -536,21 +536,44 @@ impl NameResolver<'_> {
                 Value::new(ValueKind::Call(call), value.position.clone())
             }
             ValueKind::Template(parts) => {
-                let parts = parts
-                    .iter()
-                    .map(|part| match part {
+                let mut resolved_parts: Vec<TemplatePart> = Vec::new();
+                for part in parts {
+                    let pieces = match part {
                         TemplatePart::Reference(reference) => {
                             let mut reference = reference.clone();
                             if let Target::Local(local) = &reference.target {
                                 reference.target =
                                     Target::Local(Box::new(self.resolve(local, path, diagnostics)));
                             }
-                            TemplatePart::Reference(reference)
+                            vec![TemplatePart::Reference(reference)]
                         }
-                        text => text.clone(),
-                    })
-                    .collect();
-                Value::new(ValueKind::Template(parts), value.position.clone())
+                        TemplatePart::Text(text) => {
+                            let mut resolve = |reading: &NameReading<'_>| self.read(reading, path);
+                            self.resolution
+                                .scanner
+                                .scan_placeholders(
+                                    text,
+                                    &value.position,
+                                    path,
+                                    Strictness::Strict,
+                                    &mut resolve,
+                                )
+                                .unwrap_or_else(|diagnostic| {
+                                    diagnostics.push(diagnostic);
+                                    vec![part.clone()]
+                                })
+                        }
+                    };
+                    for piece in pieces {
+                        match (resolved_parts.last_mut(), piece) {
+                            (Some(TemplatePart::Text(last)), TemplatePart::Text(text)) => {
+                                last.push_str(&text);
+                            }
+                            (_, piece) => resolved_parts.push(piece),
+                        }
+                    }
+                }
+                Value::new(ValueKind::Template(resolved_parts), value.position.clone())
             }
             ValueKind::Loop(left) => {
                 let collection = self.resolve(&left.collection, path, diagnostics);
@@ -883,6 +906,47 @@ references:
                 })
             ),
             "{x:?}"
+        );
+    }
+
+    #[test]
+    fn a_local_holding_a_reference_is_read_inside_text_as_the_local() {
+        let document = resolve(concat!(
+            "locals:\n  basename: ref queue.base\n",
+            "queue:\n  base:\n    x: 1\n  q:\n    host: \"${local.basename}.mock.${env}.com\"\n",
+        ))
+        .unwrap();
+        let host = document
+            .get("queue")
+            .and_then(|queue| queue.get("q"))
+            .and_then(|q| q.get("host"))
+            .unwrap();
+        let ValueKind::Template(parts) = &host.kind else {
+            panic!("{host:?}");
+        };
+        let shown: Vec<String> = parts
+            .iter()
+            .map(|part| match part {
+                TemplatePart::Text(text) => format!("text {text}"),
+                TemplatePart::Reference(reference) => {
+                    format!("{} {}", reference.scope, reference.name)
+                }
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            ["local basename", "text .mock.", "GLOBAL env", "text .com"]
+        );
+    }
+
+    #[test]
+    fn a_local_holding_a_scalar_is_spliced_inside_text() {
+        let document =
+            resolve("locals:\n  suffix: a\nqueue:\n  q:\n    host: q-${local.suffix}.mock\n")
+                .unwrap();
+        assert_eq!(
+            json(document.get("queue").unwrap()),
+            serde_json::json!({"q": {"host": "q-a.mock"}})
         );
     }
 
