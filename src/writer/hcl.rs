@@ -865,8 +865,9 @@ fn comment_lines(comment: &str, indent: usize) -> Vec<String> {
         .collect()
 }
 
-/// A map key: a name, a template as itself, any other expression in parentheses,
-/// so HCL evaluates it rather than reading it as a name.
+/// A map key: a name, a template as itself, a traversal with steps as itself, any
+/// other expression in parentheses, so HCL evaluates it rather than reading it as a
+/// name.
 fn object_key(key: &ObjectKey) -> Result<String, String> {
     Ok(match key {
         ObjectKey::Name(name) => map_key(name),
@@ -876,6 +877,11 @@ fn object_key(key: &ObjectKey) -> Result<String, String> {
         ObjectKey::Expression(
             expression @ (Expression::String(_) | Expression::Parenthesis(_)),
         ) => flat(expression)?,
+        ObjectKey::Expression(expression @ Expression::Traversal(traversal))
+            if !traversal.steps.is_empty() =>
+        {
+            flat(expression)?
+        }
         ObjectKey::Expression(expression) => format!("({})", flat(expression)?),
     })
 }
@@ -1326,6 +1332,24 @@ mod tests {
         assert_eq!(
             written_value(map),
             "value = { (mock_key) = \"a\", \"${env}-b\" = \"b\" }\n"
+        );
+    }
+
+    #[test]
+    fn a_traversal_key_with_steps_is_written_bare_and_a_lone_variable_key_in_parentheses() {
+        let map = Expression::Map(vec![
+            (
+                ObjectKey::Expression(Expression::Traversal(Traversal::of_names(
+                    "mock_provider",
+                    ["mock_alias"],
+                ))),
+                Expression::Traversal(Traversal::of_names("mock_provider", ["mock_alias"])),
+            ),
+            (ObjectKey::Expression(variable("mock_key")), string("a")),
+        ]);
+        assert_eq!(
+            written_value(map),
+            "value = { mock_provider.mock_alias = mock_provider.mock_alias, (mock_key) = \"a\" }\n"
         );
     }
 
