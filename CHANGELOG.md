@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.9 — 2026-11-23
+
 ### Fixed
 
 - Compiler
