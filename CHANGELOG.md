@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.0 — 2026-11-25
+
 - Compiler
   - Built on the YAML DSL standard's packages 0.4.0, so a `yaml-dsl.yml` declaring `templates` is read.
 
