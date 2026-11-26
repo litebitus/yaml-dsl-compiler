@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.3.0 — 2026-11-26
+
 - Compiler
   - A key resolves as a scalar does, at every position its reference rules list: a reference or a template is a deferred key, which a map entry carries as `deferred_key`, its references resolved and checked.
   - A key reading a builtin is a resolved key: the caller's value spliced, or the placeholder kept as written.
