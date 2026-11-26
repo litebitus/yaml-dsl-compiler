@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use fancy_regex::Regex;
 use yaml_dsl_spec::Diagnostic;
 use yaml_dsl_spec::Position;
+use yaml_dsl_spec::Severity;
 use yaml_dsl_spec::ValidationRules;
 use yaml_dsl_spec::definition::{DslDefinition, Scope};
 use yaml_dsl_spec::function_table::{FunctionTable, MacroKind};
@@ -24,7 +25,7 @@ use crate::declarations::{CompiledDeclarationRule, Declaration, Declarations, co
 use crate::discover::Unit;
 use crate::fold::deep_merge;
 use crate::macros::Expander;
-use crate::reference_scan::{NameReading, Reading, Resolver, Scanner, Strictness};
+use crate::reference_scan::{KeyReading, NameReading, Reading, Resolver, Scanner, Strictness};
 use crate::schema_provider::SchemaProvider;
 use crate::source::FileSource;
 
@@ -181,6 +182,10 @@ impl Resolution {
             &self.declaration_rules,
             &self.definition.scopes,
             None,
+            &|entry, path| {
+                self.is_deferred_key(entry, path)
+                    || expander.is_constant_body_key(&entry.key_position)
+            },
         );
         let names = NameResolver {
             resolution: self,
@@ -189,10 +194,15 @@ impl Resolution {
             builtins,
         };
         let resolved = names.resolve(&expanded, &mut Vec::new(), &mut diagnostics);
-        if diagnostics.is_empty() {
+        if !holds_error(&diagnostics) {
             diagnostics.extend(schema.validate(&resolved, &self.validation_rules));
         }
-        if !diagnostics.is_empty() {
+        let schema_warnings = document_schema
+            .warnings
+            .iter()
+            .map(|warning| Diagnostic::warning_at(&document_start, warning.clone()));
+        diagnostics.splice(0..0, schema_warnings);
+        if holds_error(&diagnostics) {
             return Err(diagnostics);
         }
         let declarations = Declarations::collect(
@@ -200,6 +210,9 @@ impl Resolution {
             &self.declaration_rules,
             &self.definition.scopes,
             None,
+            &|entry, _| {
+                entry.deferred_key.is_some() || expander.is_constant_body_key(&entry.key_position)
+            },
         )
         .in_document_order()
         .into_iter()
@@ -213,23 +226,18 @@ impl Resolution {
             ..declared
         })
         .collect();
-        let warnings = document_schema
-            .warnings
-            .iter()
-            .map(|warning| Diagnostic::at(&document_start, warning.clone()))
-            .collect();
         Ok(ResolvedUnit {
             unit: unit.clone(),
             document: resolved,
             declarations,
             fragment: false,
-            warnings,
+            warnings: diagnostics,
         })
     }
 
     /// Reads a key's placeholder before the fold: a builtin the caller gives a
-    /// value, or a local whose value is a scalar. Anything else stays as written,
-    /// for the resolution after the fold.
+    /// value, or a local whose value is a constant scalar. Anything else stays as
+    /// written, for the resolution after the fold.
     fn key_reading(
         &self,
         reading: &NameReading<'_>,
@@ -245,7 +253,9 @@ impl Resolution {
             Reading::Reference(Reference {
                 target: Target::Local(value),
                 ..
-            }) if value.scalar_text().is_some() => Reading::Value(*value),
+            }) if value.scalar_text().is_some() && !expander.known_when_used(&value) => {
+                Reading::Value(*value)
+            }
             _ => Reading::Keep,
         }
     }
@@ -258,12 +268,29 @@ impl Resolution {
         unit: &Unit,
         builtins: Option<&dyn BuiltinValues>,
     ) -> Option<ValueKind> {
-        let scope_name = reading.rule.scope_name.as_str();
-        let scope = self.definition.scopes.get(scope_name)?;
-        if !scope.builtin_names.contains(&reading.name) {
+        if !self.is_builtin(reading) {
             return None;
         }
-        builtins?.value(unit, scope_name, &reading.name)
+        builtins?.value(unit, &reading.rule.scope_name, &reading.name)
+    }
+
+    /// Whether an entry's key is a deferred key, or text a rule reads a name other
+    /// than a builtin in, which resolution reads as one.
+    fn is_deferred_key(&self, entry: &MapEntry, path: &[PathStep]) -> bool {
+        entry.deferred_key.is_some()
+            || self
+                .scanner
+                .reads_name_matching(&entry.key, &entry.key_position, path, &|reading| {
+                    !self.is_builtin(reading)
+                })
+    }
+
+    /// Whether the reading names a builtin of its scope.
+    fn is_builtin(&self, reading: &NameReading<'_>) -> bool {
+        self.definition
+            .scopes
+            .get(&reading.rule.scope_name)
+            .is_some_and(|scope| scope.builtin_names.contains(&reading.name))
     }
 
     fn resolve_keys(
@@ -345,6 +372,7 @@ impl Resolution {
             &self.declaration_rules,
             &self.definition.scopes,
             Some(&locals.scope_name),
+            &|entry, path| self.is_deferred_key(entry, path),
         );
         declared
             .of_scope(&locals.scope_name)
@@ -358,12 +386,19 @@ impl Resolution {
                 let entry = MapEntry {
                     key: key.clone(),
                     key_position: declaration.position.clone(),
+                    deferred_key: None,
                     value: declaration.value.clone(),
                 };
                 Some((name.to_owned(), (parent.to_vec(), entry)))
             })
             .collect()
     }
+}
+
+fn holds_error(diagnostics: &[Diagnostic]) -> bool {
+    diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
 }
 
 fn fold_layers(common: Option<&Node>, overlay: &Node) -> Node {
@@ -383,6 +418,7 @@ fn with_child_values(value: &Value, key: &str, patterns: &[Regex], table: &Funct
     let field_entry = MapEntry {
         key: field,
         key_position: value.position.clone(),
+        deferred_key: None,
         value: Value::string(field_value, value.position.clone()),
     };
     match &value.kind {
@@ -492,27 +528,20 @@ impl NameResolver<'_> {
             ValueKind::Map(entries) => {
                 let mut resolved_entries = Vec::with_capacity(entries.len());
                 for entry in entries {
-                    let mut resolve = |reading: &NameReading<'_>| self.read(reading, path);
-                    let key = self
-                        .resolution
-                        .scanner
-                        .scan_text(
-                            &entry.key,
-                            &entry.key_position,
-                            path,
-                            Strictness::Strict,
-                            &mut resolve,
-                        )
-                        .unwrap_or_else(|diagnostic| {
-                            diagnostics.push(diagnostic);
-                            entry.key.clone()
-                        });
+                    let (key, deferred_key) = match &entry.deferred_key {
+                        Some(deferred) => (
+                            entry.key.clone(),
+                            Some(self.resolve(deferred, path, diagnostics)),
+                        ),
+                        None => self.resolve_key(entry, path, diagnostics),
+                    };
                     path.push(PathStep::Key(key.clone()));
                     let resolved = self.resolve(&entry.value, path, diagnostics);
                     path.pop();
                     resolved_entries.push(MapEntry {
                         key,
                         key_position: entry.key_position.clone(),
+                        deferred_key,
                         value: resolved,
                     });
                 }
@@ -613,6 +642,38 @@ impl NameResolver<'_> {
         }
     }
 
+    /// A key's text and, for a deferred key, its value; a key that does not resolve
+    /// stays as written, as does a builtin the caller gives no value.
+    fn resolve_key(
+        &self,
+        entry: &MapEntry,
+        path: &[PathStep],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> (String, Option<Value>) {
+        let mut resolve = |reading: &NameReading<'_>| match self.read(reading, path) {
+            Reading::Reference(Reference {
+                target: Target::Builtin,
+                ..
+            }) => Reading::Value(Value::string(&reading.text, reading.position.clone())),
+            other => other,
+        };
+        let scanned = self.resolution.scanner.scan_key(
+            &entry.key,
+            &entry.key_position,
+            path,
+            Strictness::Strict,
+            &mut resolve,
+        );
+        match scanned {
+            Ok(KeyReading::Resolved(key)) => (key, None),
+            Ok(KeyReading::Deferred(value)) => (entry.key.clone(), Some(value)),
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                (entry.key.clone(), None)
+            }
+        }
+    }
+
     fn read(&self, reading: &NameReading<'_>, path: &[PathStep]) -> Reading {
         let scope_name = reading.rule.scope_name.as_str();
         let definition = self.resolution.definition();
@@ -652,7 +713,9 @@ impl NameResolver<'_> {
                 ))
             }
             Some(_) => Reading::Keep,
-            None if self.declarations.declares_every_name(scope_name, scope_key)
+            None if self
+                .declarations
+                .declares_every_name(scope_name, scope_key, &reading.name)
                 && self.visible(scope_name, path) =>
             {
                 Reading::Reference(self.reference(reading, Target::Undeclared))
@@ -764,6 +827,11 @@ declarations:
     scope_name: local
   - path: "$.*.*"
     skip_keys: [locals]
+    name_source: key
+    key_token: last_word
+    name_spelling: as_written
+    scope_name: ENTRY
+  - path: "$.shared.*.*"
     name_source: key
     key_token: last_word
     name_spelling: as_written
@@ -1161,8 +1229,12 @@ references:
             "      body:\n        tags fn.encode: [a]\n",
         ))
         .unwrap_err();
+        let error = errors
+            .iter()
+            .find(|diagnostic| diagnostic.severity == Severity::Error)
+            .unwrap();
         assert_eq!(
-            errors[0].message,
+            error.message,
             "a loop whose collection is known only when the document is used has no call as a key of its map body"
         );
     }
@@ -1282,5 +1354,351 @@ references:
             ),
             (3, 8)
         );
+    }
+
+    fn map_entries<'d>(document: &'d Value, keys: &[&str]) -> &'d [MapEntry] {
+        let map = keys
+            .iter()
+            .fold(document, |value, key| value.get(key).unwrap());
+        map.entries().unwrap()
+    }
+
+    fn template_shown(value: &Value) -> Vec<String> {
+        let ValueKind::Template(parts) = &value.kind else {
+            panic!("{value:?}")
+        };
+        parts
+            .iter()
+            .map(|part| match part {
+                TemplatePart::Text(text) => format!("text {text}"),
+                TemplatePart::Reference(reference) => {
+                    format!("{} {}", reference.scope, reference.name)
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_key_reading_a_declaration_whole_is_a_deferred_key() {
+        let document =
+            resolve("queue:\n  p:\n    a: 1\n  q:\n    tags:\n      ref queue.p: 1\n").unwrap();
+        let entries = map_entries(&document, &["queue", "q", "tags"]);
+        assert_eq!(entries[0].key, "ref queue.p");
+        let deferred_key = entries[0].deferred_key.as_ref().unwrap();
+        assert!(
+            matches!(
+                &deferred_key.kind,
+                ValueKind::Reference(Reference {
+                    target: Target::Declaration { .. },
+                    ..
+                })
+            ),
+            "{deferred_key:?}"
+        );
+    }
+
+    #[test]
+    fn a_deferred_key_no_declaration_answers_is_an_error() {
+        let errors = resolve("queue:\n  q:\n    tags:\n      ref queue.missing: 1\n").unwrap_err();
+        assert_eq!(errors[0].message, "Invalid reference: queue.missing");
+        assert_eq!(
+            (
+                errors[0].position.as_ref().unwrap().line,
+                errors[0].position.as_ref().unwrap().column
+            ),
+            (4, 7)
+        );
+    }
+
+    #[test]
+    fn a_key_holding_a_constant_placeholder_is_a_resolved_key() {
+        let document =
+            resolve("locals:\n  suffix: mock-a\nqueue:\n  q-${local.suffix}:\n    x: 1\n").unwrap();
+        let entries = map_entries(&document, &["queue"]);
+        assert_eq!(entries[0].key, "q-mock-a");
+        assert_eq!(entries[0].deferred_key, None);
+    }
+
+    #[test]
+    fn a_key_holding_a_placeholder_with_no_constant_is_a_template_deferred_key() {
+        let document = resolve(concat!(
+            "locals:\n  basename: ref queue.p\n",
+            "queue:\n  p:\n    a: 1\n",
+            "  q:\n    tags:\n      q-${env}: 1\n      q-${local.basename}: 2\n",
+        ))
+        .unwrap();
+        let entries = map_entries(&document, &["queue", "q", "tags"]);
+        assert_eq!(entries[0].key, "q-${env}");
+        assert_eq!(entries[0].deferred_key, None);
+        assert_eq!(entries[1].key, "q-${local.basename}");
+        assert_eq!(
+            template_shown(entries[1].deferred_key.as_ref().unwrap()),
+            ["text q-", "local basename"]
+        );
+    }
+
+    #[test]
+    fn a_declaration_path_holding_a_deferred_key_declares_nothing() {
+        let resolved = resolve_layers(
+            None,
+            concat!(
+                "locals:\n  basename: ref queue.p\n",
+                "queue:\n  p:\n    a: 1\n  ref queue.p:\n    x: 1\n",
+                "  q-${local.basename}:\n    x: 2\n  q-${env}:\n    x: 3\n",
+            ),
+        )
+        .unwrap();
+        let names: Vec<(&str, &str)> = resolved
+            .declarations
+            .iter()
+            .map(|declared| (declared.scope.as_str(), declared.name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [("local", "basename"), ("ENTRY", "p"), ("ENTRY", "q-${env}")]
+        );
+    }
+
+    /// The caller's value of every builtin: `mock-dev` for `env`.
+    struct MockBuiltins;
+
+    impl BuiltinValues for MockBuiltins {
+        fn value(&self, _unit: &Unit, _scope: &str, name: &str) -> Option<ValueKind> {
+            (name == "env").then(|| ValueKind::String("mock-dev".to_owned()))
+        }
+    }
+
+    #[test]
+    fn a_key_reading_a_builtin_the_caller_gives_is_a_resolved_key_spliced() {
+        let source = MemorySource::new()
+            .with_file("/root/dev/mock-dsl.yml", "queue:\n  q-${env}:\n    x: 1\n");
+        let resolution = Resolution::new(definition(), PathBuf::from("/root")).unwrap();
+        let unit = Unit {
+            id: "dev/mock-dsl.yml".into(),
+            file: PathBuf::from("/root/dev/mock-dsl.yml"),
+            directory: PathBuf::from("/root/dev"),
+            overlay: None,
+            common_layer: None,
+            holds_no_documents: false,
+        };
+        let options = ResolveOptions {
+            builtins: Some(&MockBuiltins),
+            schema_provider: Some(&MockSchema),
+        };
+        let resolved = resolution.resolve(&unit, &source, &options).unwrap();
+        let entries = map_entries(&resolved.document, &["queue"]);
+        assert_eq!(entries[0].key, "q-mock-dev");
+        assert_eq!(entries[0].deferred_key, None);
+        assert_eq!(resolved.declarations[0].name, "q-mock-dev");
+    }
+
+    const LOOP_KEY_DOCUMENT: &str = concat!(
+        "source:\n  p:\n    a: 1\n",
+        "queue:\n  fn.loop:\n    for: [name, item]\n    in: ref source.p\n",
+        "    body:\n      q_${~name}:\n        x: ~item\n",
+    );
+
+    fn reference_target(document: &Value, keys: &[&str]) -> Target {
+        let value = keys
+            .iter()
+            .fold(document, |value, key| value.get(key).unwrap());
+        let ValueKind::Reference(reference) = &value.kind else {
+            panic!("{value:?}")
+        };
+        reference.target.clone()
+    }
+
+    #[test]
+    fn a_loop_key_reading_a_loop_variable_declares_every_name_it_can_spell() {
+        let document = resolve(&format!(
+            "{LOOP_KEY_DOCUMENT}topic:\n  t:\n    x: ref queue.q_mock\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            reference_target(&document, &["topic", "t", "x"]),
+            Target::Undeclared
+        );
+        let errors = resolve(&format!(
+            "{LOOP_KEY_DOCUMENT}topic:\n  t:\n    x: ref queue.r_mock\n"
+        ))
+        .unwrap_err();
+        assert_eq!(errors[0].message, "Invalid reference: queue.r_mock");
+    }
+
+    #[test]
+    fn a_name_declared_explicitly_wins_over_a_loop_key() {
+        let document = resolve(&format!(
+            "{LOOP_KEY_DOCUMENT}{}",
+            concat!(
+                "shared:\n  queue:\n    q_mock:\n      x: 1\n",
+                "topic:\n  t:\n    x: ref queue.q_mock\n    y: ref queue.q_other\n",
+            )
+        ))
+        .unwrap();
+        assert!(matches!(
+            reference_target(&document, &["topic", "t", "x"]),
+            Target::Declaration { .. }
+        ));
+        assert_eq!(
+            reference_target(&document, &["topic", "t", "y"]),
+            Target::Undeclared
+        );
+    }
+
+    #[test]
+    fn a_key_reading_a_loop_variable_in_a_body_left_to_the_target_is_a_deferred_key() {
+        let document = resolve(concat!(
+            "queue:\n  p:\n    a: 1\n",
+            "  q:\n    labels fn.loop:\n      for: [name, item]\n      in: ref queue.p\n",
+            "      body:\n        - tags:\n            q-${~name}: 1\n            ~item: 2\n",
+        ))
+        .unwrap();
+        let left = loop_at(&document, "q", "labels");
+        let LoopBody::Item(item) = &left.body else {
+            panic!("{:?}", left.body)
+        };
+        let entries = map_entries(item, &["tags"]);
+        assert_eq!(
+            template_shown(entries[0].deferred_key.as_ref().unwrap()),
+            ["text q-", "LOOP name"]
+        );
+        assert_eq!(
+            loop_variable(entries[1].deferred_key.as_ref().unwrap()),
+            ("item", "")
+        );
+    }
+
+    #[test]
+    fn a_call_named_by_a_deferred_key_is_an_error() {
+        let errors = resolve(concat!(
+            "queue:\n  p:\n    a: 1\n",
+            "  q:\n    labels fn.loop:\n      in: ref queue.p\n",
+            "      body:\n        - tags:\n            ${~it} fn.encode: x\n",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            errors[0].message,
+            "the call `${~it} fn.encode` is named by a deferred key; a call's name must be a resolved key"
+        );
+    }
+
+    /// The test schema, found with a warning.
+    struct WarningSchema;
+
+    impl SchemaProvider for WarningSchema {
+        fn schema_of(&self, unit: &Unit, text: &str) -> Result<DocumentSchema, Diagnostic> {
+            let found = MockSchema.schema_of(unit, text)?;
+            Ok(DocumentSchema {
+                warnings: vec!["mock schema warning".to_owned()],
+                ..found
+            })
+        }
+    }
+
+    #[test]
+    fn what_finding_the_schema_warns_of_is_a_warning() {
+        let source = MemorySource::new().with_file("/root/dev/mock-dsl.yml", "queue: {}\n");
+        let resolution = Resolution::new(definition(), PathBuf::from("/root")).unwrap();
+        let unit = Unit {
+            id: "dev/mock-dsl.yml".into(),
+            file: PathBuf::from("/root/dev/mock-dsl.yml"),
+            directory: PathBuf::from("/root/dev"),
+            overlay: None,
+            common_layer: None,
+            holds_no_documents: false,
+        };
+        let options = ResolveOptions {
+            builtins: None,
+            schema_provider: Some(&WarningSchema),
+        };
+        let resolved = resolution.resolve(&unit, &source, &options).unwrap();
+        let shown: Vec<(Severity, &str)> = resolved
+            .warnings
+            .iter()
+            .map(|warning| (warning.severity, warning.message.as_str()))
+            .collect();
+        assert_eq!(shown, [(Severity::Warning, "mock schema warning")]);
+    }
+
+    const CONSTANT_BODY_KEY_WARNING: &str = concat!(
+        "the loop body's key `mock_queue` reads no loop variable, ",
+        "so every pass writes the same key",
+    );
+
+    #[test]
+    fn a_map_body_key_reading_no_loop_variable_is_a_warning_and_declares_nothing() {
+        let resolved = resolve_layers(
+            None,
+            concat!(
+                "locals:\n  names: [mock_a]\n",
+                "queue:\n  fn.loop:\n    in: local.names\n",
+                "    body:\n      mock_queue:\n        x: 1\n      q_${~it}:\n        x: 2\n",
+            ),
+        )
+        .unwrap();
+        let shown: Vec<(Severity, &str, usize, usize)> = resolved
+            .warnings
+            .iter()
+            .map(|warning| {
+                let position = warning.position.as_ref().unwrap();
+                (
+                    warning.severity,
+                    warning.message.as_str(),
+                    position.line,
+                    position.column,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [(Severity::Warning, CONSTANT_BODY_KEY_WARNING, 7, 7)]
+        );
+        let names: Vec<(&str, &str)> = resolved
+            .declarations
+            .iter()
+            .map(|declared| (declared.scope.as_str(), declared.name.as_str()))
+            .collect();
+        assert_eq!(names, [("local", "names"), ("ENTRY", "q_mock_a")]);
+    }
+
+    #[test]
+    fn a_constant_map_body_key_is_reported_once_however_many_passes_write_it() {
+        let errors = resolve(concat!(
+            "locals:\n  names: [mock_a, mock_b]\n",
+            "queue:\n  fn.loop:\n    in: local.names\n",
+            "    body:\n      mock_queue:\n        x: 1\n",
+        ))
+        .unwrap_err();
+        let warnings: Vec<&str> = errors
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(warnings, [CONSTANT_BODY_KEY_WARNING]);
+    }
+
+    #[test]
+    fn a_constant_key_of_a_map_body_left_to_the_target_is_a_warning_and_declares_nothing() {
+        let resolved = resolve_layers(
+            None,
+            concat!(
+                "source:\n  p:\n    a: 1\n",
+                "queue:\n  fn.loop:\n    in: ref source.p\n",
+                "    body:\n      mock_queue:\n        x: 1\n",
+            ),
+        )
+        .unwrap();
+        let shown: Vec<&str> = resolved
+            .warnings
+            .iter()
+            .map(|warning| warning.message.as_str())
+            .collect();
+        assert_eq!(shown, [CONSTANT_BODY_KEY_WARNING]);
+        let names: Vec<(&str, &str)> = resolved
+            .declarations
+            .iter()
+            .map(|declared| (declared.scope.as_str(), declared.name.as_str()))
+            .collect();
+        assert_eq!(names, [("ENTRY", "p")]);
     }
 }

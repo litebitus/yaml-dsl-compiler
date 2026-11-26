@@ -46,6 +46,13 @@ pub enum Strictness {
 
 pub type Resolver<'r> = dyn FnMut(&NameReading<'_>) -> Reading + 'r;
 
+/// What a key reads as: a resolved key's text, or a deferred key's value.
+pub enum KeyReading {
+    Resolved(String),
+    /// A reference or a template, known only when the document is used.
+    Deferred(Value),
+}
+
 pub struct Scanner {
     placeholder: Option<Regex>,
     escape_prefix: Option<String>,
@@ -141,6 +148,58 @@ impl Scanner {
             parts = vec![part];
         }
         Ok(assemble(parts, position))
+    }
+
+    /// Reads a key as `scan` reads a scalar: a constant is a resolved key, a
+    /// reference or a template a deferred key.
+    pub fn scan_key(
+        &self,
+        text: &str,
+        position: &Position,
+        path: &[PathStep],
+        strictness: Strictness,
+        resolve: &mut Resolver<'_>,
+    ) -> Result<KeyReading, Diagnostic> {
+        let value = self.scan(text, position, path, strictness, resolve)?;
+        let not_scalar = || {
+            Diagnostic::at(
+                position,
+                format!("`{text}` holds a value that is not a scalar"),
+            )
+        };
+        match &value.kind {
+            ValueKind::Reference(_)
+                if matches!(
+                    value.local_value().kind,
+                    ValueKind::Map(_) | ValueKind::List(_)
+                ) =>
+            {
+                Err(not_scalar())
+            }
+            ValueKind::Reference(_) | ValueKind::Template(_) => Ok(KeyReading::Deferred(value)),
+            _ => value
+                .scalar_text()
+                .map(KeyReading::Resolved)
+                .ok_or_else(not_scalar),
+        }
+    }
+
+    /// Whether a rule reads a name in `text` that `counted` answers for, in a
+    /// placeholder or as the whole scalar.
+    pub fn reads_name_matching(
+        &self,
+        text: &str,
+        position: &Position,
+        path: &[PathStep],
+        counted: &dyn Fn(&NameReading<'_>) -> bool,
+    ) -> bool {
+        let mut read = false;
+        let mut note_reading = |reading: &NameReading<'_>| {
+            read = read || counted(reading);
+            Reading::Keep
+        };
+        let _ = self.scan(text, position, path, Strictness::Lenient, &mut note_reading);
+        read
     }
 
     /// Reads the placeholders in `text`, a piece of a template, as `scan` reads a

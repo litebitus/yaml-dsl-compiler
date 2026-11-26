@@ -128,6 +128,38 @@ fn an_error_names_its_place_and_its_unit_writes_nothing() {
 }
 
 #[test]
+fn a_warning_names_its_place_and_its_unit_still_writes_its_file() {
+    let workspace = WorkspaceCopy::new();
+    let overlay = workspace.root.join("concern-1/dev/mock-dsl.yml");
+    fs::write(
+        &overlay,
+        concat!(
+            "queue:\n  name mock-extra:\n    visibility: 10\n",
+            "    tags fn.loop:\n      in: [mock-a]\n      body:\n        team: mock\n",
+        ),
+    )
+    .unwrap();
+    let output = workspace.run_tool();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let expected_place = format!(
+        concat!(
+            "warning: {}:7:9: the loop body's key `team` reads no loop variable, ",
+            "so every pass writes the same key",
+        ),
+        overlay.canonicalize().unwrap().display()
+    );
+    assert!(stderr.contains(&expected_place), "{stderr}");
+    assert!(
+        workspace
+            .root
+            .join("concern-1/dev")
+            .join(GENERATED_FILE)
+            .exists()
+    );
+}
+
+#[test]
 fn an_undeclared_reference_is_an_error() {
     let workspace = WorkspaceCopy::new();
     let overlay = workspace.root.join("concern-1/dev/mock-dsl.yml");

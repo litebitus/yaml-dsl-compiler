@@ -65,8 +65,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Compiles every unit and writes the files of those without errors; whether
-/// every unit compiled.
+/// Compiles every unit and writes the files of those without errors, warnings
+/// printed beside errors; whether every unit compiled.
 fn run(config_root: &Path) -> Result<bool, String> {
     let config_root = config_root
         .canonicalize()
@@ -107,6 +107,9 @@ fn run(config_root: &Path) -> Result<bool, String> {
             .compile_all(&translator)
             .map_err(|error| error.to_string())?
         {
+            for warning in &compiled.warnings {
+                eprintln!("warning: {warning}");
+            }
             match compiled.result {
                 Ok(files) => {
                     for generated in files {

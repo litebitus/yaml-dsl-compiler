@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Compiler
+  - A key resolves as a scalar does, at every position its reference rules list: a reference or a template is a deferred key, which a map entry carries as `deferred_key`, its references resolved and checked.
+  - A key reading a builtin is a resolved key: the caller's value spliced, or the placeholder kept as written.
+  - A declaration rule reads no name from a deferred key, except a key reading a loop variable, which declares every name it can spell; a name declared explicitly wins over it.
+  - In the body of a loop left for the target, a key reading a loop variable is a deferred key.
+  - A key of a loop's map body that reads no loop variable is a warning at the key, reported once, and declares no name.
+  - `CompiledUnit` lists its unit's warnings; a unit with warnings and no errors writes its files.
+  - What finding a schema warns of is a warning.
+- Example tool
+  - Prints each warning, after `warning:`, and still writes the unit's files.
+
 ## v0.2.0 — 2026-11-25
 
 - Compiler

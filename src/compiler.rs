@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 use yaml_dsl_spec::Diagnostic;
+use yaml_dsl_spec::Severity;
 use yaml_dsl_spec::definition::DslDefinition;
 
 use crate::discover::{Unit, overlays_holding_no_documents_at, selects, unit_of, units};
@@ -32,6 +33,8 @@ pub struct GeneratedFile {
 pub struct CompiledUnit {
     pub unit: Unit,
     pub result: Result<Vec<GeneratedFile>, Vec<Diagnostic>>,
+    /// What compiling warns of, whether or not the unit holds errors.
+    pub warnings: Vec<Diagnostic>,
 }
 
 pub struct Compiler {
@@ -136,9 +139,19 @@ impl Compiler {
 
     /// Compiles `unit`. A fragment compiles to no files.
     pub fn compile(&self, unit: &Unit, translator: &dyn Translator) -> CompiledUnit {
+        let (result, warnings) = match self.resolve(unit) {
+            Ok(resolved) => (self.compile_files(&resolved, translator), resolved.warnings),
+            Err(diagnostics) => {
+                let (warnings, errors) = diagnostics
+                    .into_iter()
+                    .partition(|diagnostic| diagnostic.severity == Severity::Warning);
+                (Err(errors), warnings)
+            }
+        };
         CompiledUnit {
             unit: unit.clone(),
-            result: self.compile_files(unit, translator),
+            result,
+            warnings,
         }
     }
 
@@ -156,14 +169,14 @@ impl Compiler {
 
     fn compile_files(
         &self,
-        unit: &Unit,
+        resolved: &ResolvedUnit,
         translator: &dyn Translator,
     ) -> Result<Vec<GeneratedFile>, Vec<Diagnostic>> {
-        let resolved = self.resolve(unit)?;
         if resolved.fragment {
             return Ok(Vec::new());
         }
-        let files = translator.translate(&resolved)?;
+        let unit = &resolved.unit;
+        let files = translator.translate(resolved)?;
         let mut generated = Vec::with_capacity(files.len());
         let mut diagnostics = Vec::new();
         for file in &files {

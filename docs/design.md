@@ -87,7 +87,7 @@ What Resolve hands the translator: the folded, expanded document as a tree of va
 |---|---|
 | scalar | a string, number, boolean or null |
 | list | values in order |
-| map | key and value pairs in document order |
+| map | key and value pairs in document order, a deferred key also read as a value |
 | reference | the scope and name it reads, its path into the declaration, and the declaration it resolves to |
 | call | a function call left for the target to evaluate: the function and its arguments |
 | loop | a loop left for the target to repeat: its loop variables, its collection, and the item or the entries one pass yields |
@@ -100,8 +100,11 @@ What Resolve hands the translator: the folded, expanded document as a tree of va
 - A reference keeps both what it reads and what that resolves to, so the translator decides whether the target sees a reference or the value.
 - A reference to a local whose path reaches into a value known only when the document is used, such as a field of a call's result, resolves to the reference alone.
 - A placeholder reading such a local inside longer text stays a reference to the local, among the template's other parts.
+- A key resolves as a scalar does: a constant is a resolved key, its text; a reference or a template is a deferred key, its text kept as written beside that value.
+- A builtin in a key is a constant: the caller's value spliced, or the placeholder kept as written.
+- Each key of a loop's map body reads a loop variable: a key that reads none is a warning at the key, once however many passes write it, and declares no name.
 
-Beside the document, Resolve lists the names it declares in document order: each with its scope, the key the scope is named by, the declaring key, its path and its value. The value carries the field its key sets by the definition's `child_values_from_parent_key`, first, unless the value writes that field itself.
+Beside the document, Resolve lists the names it declares in document order: each with its scope, the key the scope is named by, the declaring key, its path and its value. A declaration rule reads no name from a deferred key, except a key reading a loop variable, which declares every name it can spell; a name declared explicitly wins over it. The value carries the field its key sets by the definition's `child_values_from_parent_key`, first, unless the value writes that field itself.
 
 ## Translator
 
@@ -178,6 +181,7 @@ Writing is deterministic: the same output tree gives the same bytes.
 - A unit reports every error it finds, not only the first.
 - A schema error is placed at the value that breaks the rule, or at the key of a field the schema does not allow, and carries what is wrong there, the rule it breaks as its keyword and its JSON Pointer in the schema, and, where one allowed field or value is spelt closest, that name.
 - A unit with errors writes no files; the other units are unaffected.
+- A warning carries its place as an error does; a unit with warnings and no errors writes its files.
 
 ## Rust API
 
@@ -191,7 +195,7 @@ The crate `yaml-dsl-compiler`, beside [yaml-dsl-spec](https://github.com/litebit
 | `SchemaProvider`, `DocumentSchema` | the caller's code that finds a unit's schema, and what it hands over |
 | `Translator` | the caller's code turning a resolved unit into output files |
 | `OutputFile` | a path relative to the unit's directory, its target language, an optional comment and its body |
-| `CompiledUnit` | a unit and either its written files or every error it holds |
+| `CompiledUnit` | a unit, either its written files or every error it holds, and its warnings |
 | `ResolvedUnit` | a unit's resolved document and the names it declares |
 
 The library renders files and returns them; writing them to disk is the caller's.

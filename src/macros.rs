@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use yaml_dsl_spec::Diagnostic;
 use yaml_dsl_spec::Position;
+use yaml_dsl_spec::Severity;
 use yaml_dsl_spec::definition::{DslDefinition, MarkerFunction};
 use yaml_dsl_spec::function_table::{
     CallKey, FunctionEntry, FunctionTable, MacroEntry, MacroKind, MergeBehavior, parse_call_key,
@@ -15,7 +16,7 @@ use yaml_dsl_spec::resolved::{
     Call, Loop, LoopBody, LoopEntry, MapEntry, Reference, Target, Value, ValueKind,
 };
 
-use crate::reference_scan::{NameReading, Reading, Scanner, Strictness};
+use crate::reference_scan::{KeyReading, NameReading, Reading, Scanner, Strictness};
 
 type Bindings = Vec<(String, Value)>;
 
@@ -31,6 +32,10 @@ pub struct Expander<'a> {
     raw_locals: BTreeMap<String, (Vec<PathStep>, MapEntry)>,
     local_values: RefCell<BTreeMap<String, Value>>,
     resolving: RefCell<Vec<String>>,
+    /// What expanding a local warned of, for the document's expansion to report.
+    local_warnings: RefCell<Vec<Diagnostic>>,
+    /// Where each loop's map body writes a key that reads no loop variable.
+    constant_body_keys: RefCell<Vec<Position>>,
 }
 
 /// The maps a merge macro merges, in order; when they are a list not known when the
@@ -97,11 +102,21 @@ impl<'a> Expander<'a> {
             raw_locals,
             local_values: RefCell::new(BTreeMap::new()),
             resolving: RefCell::new(Vec::new()),
+            local_warnings: RefCell::new(Vec::new()),
+            constant_body_keys: RefCell::new(Vec::new()),
         })
     }
 
     pub fn expand_document(&self, document: &Value, diagnostics: &mut Vec<Diagnostic>) -> Value {
-        self.expand(document, &mut Vec::new(), &Vec::new(), diagnostics)
+        let expanded = self.expand(document, &mut Vec::new(), &Vec::new(), diagnostics);
+        diagnostics.append(&mut self.local_warnings.borrow_mut());
+        expanded
+    }
+
+    /// Whether `position` is where a loop's map body writes a key that reads no loop
+    /// variable, which declares no name.
+    pub fn is_constant_body_key(&self, position: &Position) -> bool {
+        self.constant_body_keys.borrow().contains(position)
     }
 
     fn local_value(&self, name: &str) -> Result<Value, Diagnostic> {
@@ -136,7 +151,11 @@ impl<'a> Expander<'a> {
             &mut diagnostics,
         );
         self.resolving.borrow_mut().pop();
-        if let Some(diagnostic) = diagnostics.into_iter().next() {
+        let (warnings, errors): (Vec<Diagnostic>, Vec<Diagnostic>) = diagnostics
+            .into_iter()
+            .partition(|diagnostic| diagnostic.severity == Severity::Warning);
+        self.local_warnings.borrow_mut().extend(warnings);
+        if let Some(diagnostic) = errors.into_iter().next() {
             return Err(diagnostic);
         }
         let value = match expanded.entries() {
@@ -284,7 +303,7 @@ impl<'a> Expander<'a> {
     /// Whether a local's value is known only when the document is used: a call, a
     /// reference, a template holding one, or text a reference rule reads whole, since
     /// a reference to anything but a local stays as written.
-    fn known_when_used(&self, value: &Value) -> bool {
+    pub fn known_when_used(&self, value: &Value) -> bool {
         match &value.local_value().kind {
             ValueKind::String(text) => self.scanner.reads_whole(text),
             ValueKind::Call(_) | ValueKind::Reference(_) | ValueKind::Template(_) => true,
@@ -305,17 +324,18 @@ impl<'a> Expander<'a> {
         let mut standing_value: Option<Value> = None;
         for entry in entries {
             let mut resolve = |reading: &NameReading<'_>| self.read(reading, bindings);
-            let key = match self.scanner.scan_text(
+            let (key, deferred_key) = match self.scanner.scan_key(
                 &entry.key,
                 &entry.key_position,
                 path,
                 Strictness::Lenient,
                 &mut resolve,
             ) {
-                Ok(key) => key,
+                Ok(KeyReading::Resolved(key)) => (key, None),
+                Ok(KeyReading::Deferred(value)) => (entry.key.clone(), Some(value)),
                 Err(diagnostic) => {
                     diagnostics.push(diagnostic);
-                    entry.key.clone()
+                    (entry.key.clone(), None)
                 }
             };
             path.push(PathStep::Key(key.clone()));
@@ -327,9 +347,16 @@ impl<'a> Expander<'a> {
                         &mut own,
                         key,
                         entry.key_position.clone(),
+                        deferred_key,
                         value,
                         diagnostics,
                     );
+                }
+                Some(_) if deferred_key.is_some() => {
+                    let message = format!(
+                        "the call `{key}` is named by a deferred key; a call's name must be a resolved key"
+                    );
+                    diagnostics.push(Diagnostic::at(&entry.key_position, message));
                 }
                 Some(call) => {
                     let key_position = entry.key_position.clone();
@@ -350,21 +377,29 @@ impl<'a> Expander<'a> {
                         call.name,
                     ) {
                         (CallYield::Value(value), Some(name)) => {
-                            push_entry(&mut own, name, key_position, value, diagnostics);
+                            push_entry(&mut own, name, key_position, None, value, diagnostics);
                         }
                         (CallYield::Value(value), None) => standing_value = Some(value),
                         (CallYield::Entries(yielded), Some(name)) => {
                             let map = Value::new(ValueKind::Map(yielded), value_position);
-                            push_entry(&mut own, name, key_position, map, diagnostics);
+                            push_entry(&mut own, name, key_position, None, map, diagnostics);
                         }
                         (CallYield::Entries(yielded), None) => {
                             for yielded_entry in yielded {
                                 let MapEntry {
                                     key,
                                     key_position,
+                                    deferred_key,
                                     value,
                                 } = yielded_entry;
-                                push_entry(&mut own, key, key_position, value, diagnostics);
+                                push_entry(
+                                    &mut own,
+                                    key,
+                                    key_position,
+                                    deferred_key,
+                                    value,
+                                    diagnostics,
+                                );
                             }
                         }
                         (CallYield::Merge(macro_entry, contents), _) => {
@@ -573,6 +608,7 @@ impl<'a> Expander<'a> {
             ));
             return None;
         }
+        self.warn_of_constant_body_keys(&variables, &body, path, diagnostics);
         let collection = self.expand(&collection, path, bindings, diagnostics);
         let items: Vec<(Value, Value)> = match &collection.local_value().kind {
             ValueKind::List(items) => items
@@ -662,6 +698,49 @@ impl<'a> Expander<'a> {
         } else {
             LoopYield::Entries(yielded_entries)
         })
+    }
+
+    /// Warns, once per key, of each key of a map body that reads none of the loop's
+    /// variables, a call with no name aside.
+    fn warn_of_constant_body_keys(
+        &self,
+        variables: &[String],
+        body: &Value,
+        path: &[PathStep],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let reads_loop_variable = |reading: &NameReading<'_>| {
+            self.loop_scope.as_deref() == Some(reading.rule.scope_name.as_str())
+                && variables.contains(&reading.name)
+        };
+        for entry in body.entries().unwrap_or_default() {
+            let nameless_call = self
+                .marker
+                .and_then(|marker| parse_call_key(&entry.key, marker))
+                .is_some_and(|call| call.name.is_none());
+            if nameless_call
+                || self.is_constant_body_key(&entry.key_position)
+                || self.scanner.reads_name_matching(
+                    &entry.key,
+                    &entry.key_position,
+                    path,
+                    &reads_loop_variable,
+                )
+            {
+                continue;
+            }
+            self.constant_body_keys
+                .borrow_mut()
+                .push(entry.key_position.clone());
+            let message = format!(
+                concat!(
+                    "the loop body's key `{}` reads no loop variable, ",
+                    "so every pass writes the same key",
+                ),
+                entry.key
+            );
+            diagnostics.push(Diagnostic::warning_at(&entry.key_position, message));
+        }
     }
 
     /// A loop's body expanded once for the target to repeat, each loop variable
@@ -814,6 +893,7 @@ fn push_entry(
     own: &mut Vec<MapEntry>,
     key: String,
     key_position: Position,
+    deferred_key: Option<Value>,
     value: Value,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -827,6 +907,7 @@ fn push_entry(
     own.push(MapEntry {
         key,
         key_position,
+        deferred_key,
         value,
     });
 }
@@ -1037,6 +1118,7 @@ fn json_value(json: &serde_json::Value, position: &Position) -> Value {
                 .map(|(key, value)| MapEntry {
                     key: key.clone(),
                     key_position: position.clone(),
+                    deferred_key: None,
                     value: json_value(value, position),
                 })
                 .collect(),
