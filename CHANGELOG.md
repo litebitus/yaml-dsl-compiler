@@ -10,6 +10,8 @@
   - A key of a loop's map body that reads no loop variable is a warning at the key, reported once, and declares no name.
   - `CompiledUnit` lists its unit's warnings; a unit with warnings and no errors writes its files.
   - What finding a schema warns of is a warning.
+- HCL writer
+  - A parenthesized key or value too wide for its line puts its parentheses on lines of their own.
 - Example tool
   - Prints each warning, after `warning:`, and still writes the unit's files.
 

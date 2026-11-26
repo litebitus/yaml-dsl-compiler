@@ -35,6 +35,8 @@ pub fn write(file: &OutputFile) -> Result<String, String> {
 enum Item<'a> {
     Assignment {
         key: String,
+        /// The expression a key's parentheses hold, which breaks onto lines of its own.
+        parenthesized_key: Option<&'a Expression>,
         value: &'a Expression,
         comment: Option<&'a str>,
     },
@@ -54,6 +56,7 @@ impl<'a> Item<'a> {
                 }
                 Ok(Item::Assignment {
                     key: name.clone(),
+                    parenthesized_key: None,
                     value,
                     comment: comment.as_deref(),
                 })
@@ -65,6 +68,9 @@ impl<'a> Item<'a> {
 
 struct RenderedItem<'a> {
     key: Option<&'a str>,
+    /// A key too wide for its line, as its parenthesis lines; the value follows its
+    /// closing parenthesis.
+    broken_key: Vec<String>,
     comment: Option<&'a str>,
     lines: Vec<String>,
     /// A block or a multi-line map, which has a blank line on each side.
@@ -75,7 +81,25 @@ impl RenderedItem<'_> {
     /// Whether the item's `=` aligns with its neighbors': an assignment written on
     /// one line, or opening a heredoc, which HCL reads as one line.
     fn aligns(&self) -> bool {
-        self.key.is_some() && (self.lines.len() == 1 || self.lines[0].starts_with(HEREDOC_OPENER))
+        self.key.is_some()
+            && self.broken_key.is_empty()
+            && (self.lines.len() == 1 || self.lines[0].starts_with(HEREDOC_OPENER))
+    }
+
+    /// Whether the item starts a run its `=` aligns in: an aligning item, or a broken
+    /// key, whose closing parenthesis's `=` aligns with the assignments after it.
+    fn starts_alignment_run(&self) -> bool {
+        self.aligns() || !self.broken_key.is_empty()
+    }
+
+    /// The width of what the item's `=` follows on its line: a broken key's closing
+    /// parenthesis, or the key.
+    fn aligned_key_width(&self) -> usize {
+        if self.broken_key.is_empty() {
+            self.key.map_or(0, str::len)
+        } else {
+            ")".len()
+        }
     }
 }
 
@@ -93,11 +117,22 @@ fn item_lines(items: &[Item<'_>], indent: usize) -> Result<Vec<String>, String> 
         rendered.push(match item {
             Item::Assignment {
                 key,
+                parenthesized_key,
                 value,
                 comment,
             } => {
-                let lines =
-                    expression_lines(value, indent, indent + key_width_bound + " = ".len(), true)?;
+                let used = indent + key_width_bound + " = ".len();
+                let mut lines = expression_lines(value, indent, used, true)?;
+                let mut broken_key = Vec::new();
+                if let Some(key_expression) = parenthesized_key
+                    && used + lines[0].len() > MAX_LINE_WIDTH
+                {
+                    let value_lines = expression_lines(value, indent, indent + ") = ".len(), true)?;
+                    if value_lines.len() == 1 {
+                        broken_key = parenthesis_lines(key_expression, indent)?;
+                        lines = value_lines;
+                    }
+                }
                 let stands_apart = lines.len() > 1
                     && match value {
                         Expression::Map(_) => true,
@@ -106,6 +141,7 @@ fn item_lines(items: &[Item<'_>], indent: usize) -> Result<Vec<String>, String> 
                     };
                 RenderedItem {
                     key: Some(key.as_str()),
+                    broken_key,
                     comment: *comment,
                     lines,
                     stands_apart,
@@ -113,6 +149,7 @@ fn item_lines(items: &[Item<'_>], indent: usize) -> Result<Vec<String>, String> 
             }
             Item::Block(block) => RenderedItem {
                 key: None,
+                broken_key: Vec::new(),
                 comment: block.comment.as_deref(),
                 lines: block_lines(block, indent)?,
                 stands_apart: true,
@@ -125,8 +162,8 @@ fn item_lines(items: &[Item<'_>], indent: usize) -> Result<Vec<String>, String> 
         let run_end = alignment_run_end(&rendered, index);
         let key_width = rendered[index..run_end]
             .iter()
-            .filter_map(|item| item.key)
-            .map(str::len)
+            .filter(|item| item.key.is_some())
+            .map(RenderedItem::aligned_key_width)
             .max()
             .unwrap_or(0);
         for position in index..run_end {
@@ -138,6 +175,19 @@ fn item_lines(items: &[Item<'_>], indent: usize) -> Result<Vec<String>, String> 
                 lines.extend(comment_lines(comment, indent));
             }
             match item.key {
+                Some(_) if !item.broken_key.is_empty() => {
+                    let (closing, opening) = item
+                        .broken_key
+                        .split_last()
+                        .expect("a broken key has lines");
+                    lines.push(format!("{}{}", spaces(indent), opening[0]));
+                    lines.extend(opening[1..].iter().cloned());
+                    lines.push(format!(
+                        "{closing}{} = {}",
+                        spaces(key_width - item.aligned_key_width()),
+                        item.lines[0]
+                    ));
+                }
                 Some(key) => {
                     let padding = if item.aligns() {
                         key_width - key.len()
@@ -163,7 +213,7 @@ fn item_lines(items: &[Item<'_>], indent: usize) -> Result<Vec<String>, String> 
 /// The end of the run of aligning assignments starting at `start`; any other item
 /// is a run of its own.
 fn alignment_run_end(rendered: &[RenderedItem<'_>], start: usize) -> usize {
-    if !rendered[start].aligns() {
+    if !rendered[start].starts_alignment_run() {
         return start + 1;
     }
     let mut end = start + 1;
@@ -233,6 +283,7 @@ fn expression_lines(
                 .map(|(key, value)| {
                     Ok(Item::Assignment {
                         key: object_key(key)?,
+                        parenthesized_key: parenthesized_key(key),
                         value,
                         comment: None,
                     })
@@ -267,8 +318,21 @@ fn expression_lines(
         }
         Expression::For(for_expression) => for_lines(for_expression, indent),
         Expression::Conditional(conditional) => conditional_lines(conditional, indent, used),
+        Expression::Parenthesis(inner_expression) => parenthesis_lines(inner_expression, indent),
         _ => Ok(vec![flat(expression)?]),
     }
+}
+
+/// A parenthesized expression too wide for one line: its parentheses on lines of
+/// their own, and the expression between them broken as any value is.
+fn parenthesis_lines(inner_expression: &Expression, indent: usize) -> Result<Vec<String>, String> {
+    let inner = indent + INDENT_WIDTH;
+    let mut lines = vec!["(".to_owned()];
+    let mut inner_lines = expression_lines(inner_expression, inner, inner, false)?;
+    inner_lines[0].insert_str(0, &spaces(inner));
+    lines.extend(inner_lines);
+    lines.push(format!("{})", spaces(indent)));
+    Ok(lines)
 }
 
 /// A call whose last argument is a map or a list, written around it: its other
@@ -406,7 +470,7 @@ fn breakable(expression: &Expression) -> bool {
         Expression::List(items) => !items.is_empty(),
         Expression::Map(entries) => !entries.is_empty(),
         Expression::Call(call) => !call.arguments.is_empty(),
-        Expression::For(_) | Expression::Conditional(_) => true,
+        Expression::For(_) | Expression::Conditional(_) | Expression::Parenthesis(_) => true,
         _ => false,
     }
 }
@@ -869,21 +933,30 @@ fn comment_lines(comment: &str, indent: usize) -> Vec<String> {
 /// other expression in parentheses, so HCL evaluates it rather than reading it as a
 /// name.
 fn object_key(key: &ObjectKey) -> Result<String, String> {
+    if let Some(expression) = parenthesized_key(key) {
+        return Ok(format!("({})", flat(expression)?));
+    }
     Ok(match key {
         ObjectKey::Name(name) => map_key(name),
         ObjectKey::Expression(Expression::Template(parts)) => {
             format!("\"{}\"", template_text(parts, escape_quoted)?)
         }
-        ObjectKey::Expression(
-            expression @ (Expression::String(_) | Expression::Parenthesis(_)),
-        ) => flat(expression)?,
-        ObjectKey::Expression(expression @ Expression::Traversal(traversal))
-            if !traversal.steps.is_empty() =>
-        {
-            flat(expression)?
-        }
-        ObjectKey::Expression(expression) => format!("({})", flat(expression)?),
+        ObjectKey::Expression(expression) => flat(expression)?,
     })
+}
+
+/// The expression a map key's parentheses hold: a parenthesized key's, or any key
+/// but a name, a string, a template and a traversal with steps.
+fn parenthesized_key(key: &ObjectKey) -> Option<&Expression> {
+    match key {
+        ObjectKey::Name(_)
+        | ObjectKey::Expression(Expression::String(_) | Expression::Template(_)) => None,
+        ObjectKey::Expression(Expression::Parenthesis(inner_expression)) => Some(inner_expression),
+        ObjectKey::Expression(Expression::Traversal(traversal)) if !traversal.steps.is_empty() => {
+            None
+        }
+        ObjectKey::Expression(expression) => Some(expression),
+    }
 }
 
 fn map_key(key: &str) -> String {
@@ -1350,6 +1423,117 @@ mod tests {
         assert_eq!(
             written_value(map),
             "value = { mock_provider.mock_alias = mock_provider.mock_alias, (mock_key) = \"a\" }\n"
+        );
+    }
+
+    fn long_traversal(steps: &[&str]) -> Expression {
+        Expression::Traversal(Traversal::of_names("module", steps.iter().copied()))
+    }
+
+    const LONG_KEY_STEPS: [&str; 5] = [
+        "mock_repository_environments_this",
+        "o",
+        "environments",
+        "mock_repository_with_a_long_name",
+        "name",
+    ];
+
+    #[test]
+    fn a_parenthesized_key_too_wide_for_its_line_puts_its_parentheses_on_lines_of_their_own() {
+        let map = Expression::Map(vec![
+            (ObjectKey::Name("mock_name".into()), string("a")),
+            (
+                ObjectKey::Expression(Expression::Parenthesis(Box::new(long_traversal(
+                    &LONG_KEY_STEPS,
+                )))),
+                long_traversal(&["mock_role_with_a_long_name", "o", "arn"]),
+            ),
+        ]);
+        assert_eq!(
+            written_value(map),
+            concat!(
+                "value = {\n",
+                "  mock_name = \"a\"\n",
+                "  (\n",
+                "    module.mock_repository_environments_this.o.environments",
+                ".mock_repository_with_a_long_name.name\n",
+                "  ) = module.mock_role_with_a_long_name.o.arn\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn a_broken_keys_closing_parenthesis_aligns_with_the_assignments_after_it() {
+        let map = Expression::Map(vec![
+            (
+                ObjectKey::Expression(Expression::Parenthesis(Box::new(long_traversal(
+                    &LONG_KEY_STEPS,
+                )))),
+                long_traversal(&["mock_role_with_a_long_name", "o", "arn"]),
+            ),
+            (ObjectKey::Name("mock_name".into()), string("a")),
+        ]);
+        assert_eq!(
+            written_value(map),
+            concat!(
+                "value = {\n",
+                "  (\n",
+                "    module.mock_repository_environments_this.o.environments",
+                ".mock_repository_with_a_long_name.name\n",
+                "  )         = module.mock_role_with_a_long_name.o.arn\n",
+                "  mock_name = \"a\"\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn a_parenthesized_key_stays_on_its_line_when_its_value_breaks() {
+        let value = Expression::Map(vec![
+            (ObjectKey::Name("mock_a".into()), string("a")),
+            (ObjectKey::Name("mock_b".into()), string("b")),
+            (ObjectKey::Name("mock_c".into()), string("c")),
+        ]);
+        let map = Expression::Map(vec![(
+            ObjectKey::Expression(Expression::Parenthesis(Box::new(long_traversal(
+                &LONG_KEY_STEPS,
+            )))),
+            value,
+        )]);
+        assert_eq!(
+            written_value(map),
+            concat!(
+                "value = {\n",
+                "  (module.mock_repository_environments_this.o.environments",
+                ".mock_repository_with_a_long_name.name) = {\n",
+                "    mock_a = \"a\"\n",
+                "    mock_b = \"b\"\n",
+                "    mock_c = \"c\"\n",
+                "  }\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn a_parenthesized_value_too_wide_for_its_line_puts_its_parentheses_on_lines_of_their_own() {
+        let value = Expression::Parenthesis(Box::new(long_traversal(&[
+            "mock_repository_environments_this",
+            "o",
+            "environments",
+            "mock_repository_with_a_long_name",
+            "mock_environment",
+            "name",
+        ])));
+        assert_eq!(
+            written_value(value),
+            concat!(
+                "value = (\n",
+                "  module.mock_repository_environments_this.o.environments",
+                ".mock_repository_with_a_long_name.mock_environment.name\n",
+                ")\n",
+            )
         );
     }
 

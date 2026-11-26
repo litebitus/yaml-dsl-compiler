@@ -142,13 +142,14 @@ HCL style:
 
 - Two-space indentation, by bracket depth as `terraform fmt` counts it: a line closing as many brackets as it opens, such as `} : name => merge(`, stays at the level of the lines inside, and a heredoc's body is kept as written.
 - A blank line on each side of a block and of an attribute holding a multi-line map; none between other attributes.
-- `=` aligned within a run of single-line attributes; a multi-line value or a comment ends the run, and a heredoc stays in it.
+- `=` aligned within a run of single-line attributes; a multi-line value or a comment ends the run, a heredoc stays in it, and a broken key's closing parenthesis starts one.
 - A list or map of three or more items is written one item per line with a trailing comma; one or two items stay inline when the line fits.
 - No line is wider than 100 columns where the language lets a line break:
   - a call that does not fit takes its arguments one per line, or, where its last argument is a map or a list, wraps it: `merge(local.base, {` to `})`;
   - a list or map that does not fit goes one item per line;
   - a `for` expression that does not fit puts its brackets on lines of their own and breaks its collection and value;
   - a conditional that does not fit keeps its condition on the first line and breaks its branches;
+  - a parenthesized expression that does not fit puts its parentheses on lines of their own, the expression between them, and a key's does so where its value is written on one line;
   - an operation and an interpolation stay on one line.
 - An operation takes parentheses where precedence needs them, and an expression key takes them unless it is a template.
 - A multi-line string is an indented heredoc, `<<-EOT`.
