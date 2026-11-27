@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.3.1 — 2026-11-27
+
 - Compiler
   - A schema provider's warnings are diagnostics, kept with their place, label and help.
 
