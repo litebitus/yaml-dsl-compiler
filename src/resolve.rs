@@ -197,11 +197,7 @@ impl Resolution {
         if !holds_error(&diagnostics) {
             diagnostics.extend(schema.validate(&resolved, &self.validation_rules));
         }
-        let schema_warnings = document_schema
-            .warnings
-            .iter()
-            .map(|warning| Diagnostic::warning_at(&document_start, warning.clone()));
-        diagnostics.splice(0..0, schema_warnings);
+        diagnostics.splice(0..0, document_schema.warnings);
         if holds_error(&diagnostics) {
             return Err(diagnostics);
         }
@@ -1582,14 +1578,21 @@ references:
         );
     }
 
-    /// The test schema, found with a warning.
+    /// The test schema, found with a warning placed in the config and its fix.
     struct WarningSchema;
+
+    fn mock_schema_warning() -> Diagnostic {
+        let config_file: Arc<str> = Arc::from("/root/mock-yaml-dsl.yml");
+        Diagnostic::warning_at(&Position::new(&config_file, 4, 7), "mock schema warning")
+            .with_label("mock refusal")
+            .with_help(Some("mock fix".to_owned()))
+    }
 
     impl SchemaProvider for WarningSchema {
         fn schema_of(&self, unit: &Unit, text: &str) -> Result<DocumentSchema, Diagnostic> {
             let found = MockSchema.schema_of(unit, text)?;
             Ok(DocumentSchema {
-                warnings: vec!["mock schema warning".to_owned()],
+                warnings: vec![mock_schema_warning()],
                 ..found
             })
         }
@@ -1612,12 +1615,7 @@ references:
             schema_provider: Some(&WarningSchema),
         };
         let resolved = resolution.resolve(&unit, &source, &options).unwrap();
-        let shown: Vec<(Severity, &str)> = resolved
-            .warnings
-            .iter()
-            .map(|warning| (warning.severity, warning.message.as_str()))
-            .collect();
-        assert_eq!(shown, [(Severity::Warning, "mock schema warning")]);
+        assert_eq!(resolved.warnings, [mock_schema_warning()]);
     }
 
     const CONSTANT_BODY_KEY_WARNING: &str = concat!(

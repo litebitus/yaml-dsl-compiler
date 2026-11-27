@@ -65,7 +65,7 @@ What the editor reads and the compiler does not yet:
 The library is pure code: it finds, fetches and reads no schema itself. The caller's schema provider hands it each unit's schema: its text, the name reports give it, the fragment of the schema a fragment document's root is, and what finding it warns of. A program finds a schema the way its DSL calls for, such as the editor's rules of a modeline and then `schema_search_paths`; the library keeps the definition's `schema_search_paths` for it to read.
 
 - Each schema is parsed and compiled once per run, by its name and text, however many units read it.
-- What finding a schema warns of comes back with the resolved unit, as warnings that fail nothing.
+- What finding a schema warns of comes back with the resolved unit, as warnings that fail nothing, each placed and noted as the provider gave it.
 
 ### Builtin values
 

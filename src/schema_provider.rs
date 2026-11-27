@@ -14,8 +14,9 @@ pub struct DocumentSchema {
     /// Where in the schema the document's root is, for a fragment, which is never
     /// compiled alone; `None` for a full document.
     pub fragment: Option<String>,
-    /// What finding the schema warns of, such as a credential its server refused.
-    pub warnings: Vec<String>,
+    /// What finding the schema warns of, such as a credential its server refused,
+    /// each placed where the provider found it.
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// The caller's code that finds a unit's schema.
